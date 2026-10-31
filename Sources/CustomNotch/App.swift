@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "capsule.portrait.fill",
                                            accessibilityDescription: "CustomNotch")
         let menu = NSMenu()
+        let settings = NSMenuItem(title: "Notch Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
         let reset = NSMenuItem(title: "Reset Position", action: #selector(resetPosition), keyEquivalent: "r")
         reset.target = self
         menu.addItem(reset)
@@ -33,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
         statusItem.menu = menu
     }
+
+    @objc private func openSettings() { controller.openSettings() }
 
     @objc private func resetPosition() { controller.resetPosition() }
 

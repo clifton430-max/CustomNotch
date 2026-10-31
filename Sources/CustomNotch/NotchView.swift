@@ -51,8 +51,7 @@ private struct NotchContent: View {
                         VerticalExpanded(model: model, stats: stats)
                     }
                 }
-                .frame(width: NotchMetrics.expanded(horizontal: horizontal).width,
-                       height: NotchMetrics.expanded(horizontal: horizontal).height)
+                .scaled(to: NotchMetrics.expanded(horizontal: horizontal), by: model.sizing.scale)
                 .transition(.asymmetric(
                     insertion: .modifier(active: Reveal(progress: 0, anchor: model.edge.unitPoint),
                                          identity: Reveal(progress: 1, anchor: model.edge.unitPoint))
@@ -69,13 +68,21 @@ private struct NotchContent: View {
                     }
                 }
                 .id(horizontal)
-                .frame(width: NotchMetrics.collapsed(horizontal: horizontal).width,
-                       height: NotchMetrics.collapsed(horizontal: horizontal).height)
+                .scaled(to: model.sizing.collapsedLayout(horizontal: horizontal), by: model.sizing.scale)
                 .transition(.asymmetric(
                     insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.12)),
                     removal: .opacity.animation(.easeOut(duration: 0.1))))
             }
         }
+    }
+}
+
+private extension View {
+    /// Lays the view out at `size`, then scales it uniformly so it occupies `size * scale`.
+    func scaled(to size: CGSize, by scale: CGFloat) -> some View {
+        frame(width: size.width, height: size.height)
+            .scaleEffect(scale)
+            .frame(width: size.width * scale, height: size.height * scale)
     }
 }
 
@@ -94,7 +101,7 @@ private struct Reveal: ViewModifier {
 
 // MARK: - Collapsed
 
-private struct HorizontalCollapsed: View {
+struct HorizontalCollapsed: View {
     @ObservedObject var stats: SystemStats
 
     var body: some View {
@@ -147,15 +154,19 @@ private struct HorizontalExpanded: View {
     @ObservedObject var stats: SystemStats
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            ClockBlock(model: model, stats: stats)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            StatRings(stats: stats, size: 42)
-            Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 70)
-            ActionGrid(showsLabels: false)
+        VStack(spacing: 8) {
+            ExpandedHeader(model: model)
+            HStack(alignment: .center, spacing: 12) {
+                ClockBlock(stats: stats)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                StatRings(stats: stats, size: 42)
+                Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 70)
+                ActionGrid(showsLabels: false)
+            }
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
     }
 }
 
@@ -164,34 +175,82 @@ private struct VerticalExpanded: View {
     @ObservedObject var stats: SystemStats
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            ClockBlock(model: model, stats: stats)
+        VStack(alignment: .leading, spacing: 20) {
+            ExpandedHeader(model: model)
+            ClockBlock(stats: stats)
             StatRings(stats: stats, size: 52)
                 .frame(maxWidth: .infinity)
             ActionGrid(showsLabels: true)
                 .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 22)
+        .padding(.vertical, 18)
+    }
+}
+
+/// Date on the left; pin and settings controls in the top-right corner. The controls only
+/// exist while the notch is open on hover, and settle in just after the panel does.
+private struct ExpandedHeader: View {
+    @ObservedObject var model: NotchModel
+    @State private var showsControls = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                    .lineLimit(1)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            Spacer(minLength: 4)
+            Group {
+                PinButton(isPinned: $model.isPinned)
+                HeaderIconButton(symbol: "gearshape.fill", help: "Notch Settings", spinsOnHover: true,
+                                 action: model.openSettings)
+            }
+            .opacity(showsControls ? 1 : 0)
+            .scaleEffect(showsControls ? 1 : 0.5)
+            .blur(radius: showsControls ? 0 : 3)
+        }
+        .frame(height: 20)
+        .onAppear {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.7).delay(0.16)) { showsControls = true }
+        }
+    }
+}
+
+private struct HeaderIconButton: View {
+    let symbol: String
+    let help: String
+    var tint: Color = .white
+    var isActive = false
+    var spinsOnHover = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10.5, weight: .semibold))
+                .rotationEffect(.degrees(spinsOnHover && hovering ? 60 : 0))
+                .foregroundStyle(isActive ? tint : .white.opacity(hovering ? 0.9 : 0.45))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(.white.opacity(hovering ? 0.12 : 0)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle())
+        .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
+        .help(help)
     }
 }
 
 private struct ClockBlock: View {
-    @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                        .lineLimit(1)
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .textCase(.uppercase)
-                        .foregroundStyle(.white.opacity(0.5))
-                    Spacer(minLength: 4)
-                    PinButton(isPinned: $model.isPinned)
-                }
                 let time = context.date.formatted(.dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
                 Text(time)
                     .font(.system(size: 38, weight: .semibold, design: .rounded))
@@ -218,22 +277,12 @@ private struct ClockBlock: View {
 
 private struct PinButton: View {
     @Binding var isPinned: Bool
-    @State private var hovering = false
 
     var body: some View {
-        Button {
+        HeaderIconButton(symbol: isPinned ? "pin.fill" : "pin", help: isPinned ? "Unpin" : "Keep open",
+                         tint: .orange, isActive: isPinned) {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isPinned.toggle() }
-        } label: {
-            Image(systemName: isPinned ? "pin.fill" : "pin")
-                .font(.system(size: 10, weight: .semibold))
-                .rotationEffect(.degrees(isPinned ? 0 : 45))
-                .foregroundStyle(isPinned ? Color.orange : .white.opacity(hovering ? 0.8 : 0.4))
-                .frame(width: 20, height: 20)
-                .background(Circle().fill(.white.opacity(hovering ? 0.1 : 0)))
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(isPinned ? "Unpin" : "Keep open")
     }
 }
 
@@ -320,7 +369,7 @@ private struct QuickAction: Identifiable {
         QuickAction(symbol: "folder.fill", title: "Finder", bundleID: "com.apple.finder"),
         QuickAction(symbol: "camera.viewfinder", title: "Capture", bundleID: "com.apple.screenshot.launcher"),
         QuickAction(symbol: "calendar", title: "Calendar", bundleID: "com.apple.iCal"),
-        QuickAction(symbol: "gearshape.fill", title: "Settings", bundleID: "com.apple.systempreferences"),
+        QuickAction(symbol: "switch.2", title: "System", bundleID: "com.apple.systempreferences"),
     ]
 
     func perform() {

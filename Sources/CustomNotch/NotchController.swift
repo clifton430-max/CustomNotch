@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import QuartzCore
 import SwiftUI
 
@@ -44,6 +45,10 @@ final class NotchHostingView<Content: View>: NSHostingView<Content> {
 final class NotchController: NSObject {
     let model = NotchModel()
     let stats = SystemStats()
+    let settings = NotchSettings()
+    private lazy var settingsWindow = SettingsWindowController(settings: settings, stats: stats)
+    private var sizing = NotchSizing.standard
+    private var sizingObserver: AnyCancellable?
 
     private let canvas = NotchMetrics.canvas
     private var panel: NotchPanel!
@@ -81,6 +86,7 @@ final class NotchController: NSObject {
         static let close = Animation.spring(response: 0.38, dampingFraction: 0.9)
         static let snap = Animation.spring(response: 0.5, dampingFraction: 0.72)
         static let lift = Animation.spring(response: 0.34, dampingFraction: 0.74)
+        static let resize = Animation.spring(response: 0.3, dampingFraction: 0.82)
     }
 
     // MARK: Lifecycle
@@ -91,6 +97,13 @@ final class NotchController: NSObject {
         let host = NotchHostingView(rootView: root)
         host.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
         panel.contentView = host
+        model.openSettings = { [weak self] in self?.openSettings() }
+
+        sizing = settings.sizing
+        // `$sizing` fires before the stored value changes, so use the value it delivers.
+        sizingObserver = settings.$sizing.removeDuplicates().dropFirst().sink { [weak self] new in
+            self?.sizingChanged(to: new)
+        }
 
         restorePosition()
         moveWindow(to: attachPoint)
@@ -137,6 +150,27 @@ final class NotchController: NSObject {
         startSpring()
         applyLayout(Anim.snap)
         savePosition(screen: screen)
+    }
+
+    func openSettings() {
+        settingsWindow.show()
+    }
+
+    private func sizingChanged(to new: NotchSizing) {
+        sizing = new
+        guard !isDragging else { return }
+        // Re-attach so the resized notch still fits its edge, gliding there if it had to move.
+        let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(attachPoint) })
+            ?? NSScreen.screens.first
+        if let screen {
+            let previous = attachPoint
+            attach(edge: edge, screen: screen, along: edge.isHorizontal ? attachPoint.x : attachPoint.y)
+            if attachPoint != previous {
+                springVelocity = .zero
+                startSpring()
+            }
+        }
+        applyLayout(Anim.resize)
     }
 
     @objc private func screensChanged() {
@@ -212,7 +246,7 @@ final class NotchController: NSObject {
         let f = screen.frame
         edge = newEdge
         alongRange = allowedRange(edge: newEdge, screen: screen, near: along)
-        let collapsed = NotchMetrics.collapsed(horizontal: newEdge.isHorizontal)
+        let collapsed = sizing.collapsed(horizontal: newEdge.isHorizontal)
         let span = newEdge.isHorizontal ? collapsed.width : collapsed.height
         let a = clamp(along, centeredSpan: span, in: alongRange)
         switch newEdge {
@@ -233,12 +267,12 @@ final class NotchController: NSObject {
         let radius: CGFloat
 
         if isDragging {
-            size = NotchMetrics.collapsed(horizontal: horizontal)
+            size = sizing.collapsed(horizontal: horizontal)
             rect = CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height)
             radius = min(size.width, size.height) / 2
             ear = -radius
         } else {
-            size = isExpanded ? NotchMetrics.expanded(horizontal: horizontal) : NotchMetrics.collapsed(horizontal: horizontal)
+            size = isExpanded ? sizing.expanded(horizontal: horizontal) : sizing.collapsed(horizontal: horizontal)
             let along = horizontal ? attachPoint.x : attachPoint.y
             let span = horizontal ? size.width : size.height
             let shift = clamp(along, centeredSpan: span, in: alongRange) - along
@@ -249,8 +283,8 @@ final class NotchController: NSObject {
             case .left: rect = CGRect(x: 0, y: shift - h / 2, width: w, height: h)
             case .right: rect = CGRect(x: -w, y: shift - h / 2, width: w, height: h)
             }
-            ear = isExpanded ? 14 : 9
-            radius = isExpanded ? 32 : 14
+            ear = (isExpanded ? 14 : 9) * sizing.scale
+            radius = (isExpanded ? 32 : 14) * sizing.scale
         }
         bodyRect = rect
 
@@ -263,6 +297,7 @@ final class NotchController: NSObject {
             self.model.bodySize = size
             self.model.ear = ear
             self.model.radius = radius
+            self.model.sizing = self.sizing
         }
         if let animation {
             withAnimation(animation, update)
@@ -511,9 +546,19 @@ final class NotchController: NSObject {
         }
     }
 
+    /// "CustomNotch.debugSize" with "width,height,scale" sets the sizing; with no object it
+    /// opens Notch Settings.
+    @objc private func debugSize(_ note: Notification) {
+        guard let s = note.object as? String else { return openSettings() }
+        let v = s.split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) }
+        guard v.count == 3 else { return }
+        settings.sizing = NotchSizing(width: v[0], height: v[1], scale: v[2])
+    }
+
     func installDebugHooks() {
-        DistributedNotificationCenter.default().addObserver(self, selector: #selector(debugThrow(_:)),
-                                                            name: .init("CustomNotch.debugThrow"), object: nil)
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(self, selector: #selector(debugThrow(_:)), name: .init("CustomNotch.debugThrow"), object: nil)
+        center.addObserver(self, selector: #selector(debugSize(_:)), name: .init("CustomNotch.debugSize"), object: nil)
     }
     #endif
 
