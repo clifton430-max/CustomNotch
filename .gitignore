@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+CustomNotch.app/
+.vscode/
+.DS_Store
