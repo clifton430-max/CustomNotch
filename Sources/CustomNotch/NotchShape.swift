@@ -10,6 +10,8 @@ struct NotchShape: Shape {
     var ear: CGFloat
     var radius: CGFloat
     var pad: CGFloat = NotchMetrics.earPad
+    /// When false the path stops short of the attached edge, tracing only the exposed sides.
+    var isClosed = true
 
     var animatableData: AnimatablePair<CGFloat, CGFloat> {
         get { AnimatablePair(ear, radius) }
@@ -46,7 +48,7 @@ struct NotchShape: Shape {
         p.continuousCorner(corner: pt(length, depth), to: pt(length, depth - r))
         p.addLine(to: pt(length, a))
         p.continuousCorner(corner: pt(length, 0), to: pt(length + s, 0))
-        p.closeSubpath()
+        if isClosed { p.closeSubpath() }
         return p
     }
 }

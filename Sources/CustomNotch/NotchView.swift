@@ -64,7 +64,8 @@ private struct NotchContent: View {
                     if horizontal {
                         HorizontalCollapsed(stats: stats)
                     } else {
-                        VerticalCollapsed(stats: stats)
+                        VerticalCollapsed(stats: stats, size: model.sizing.collapsedLayout(horizontal: false),
+                                          edge: model.edge)
                     }
                 }
                 .id(horizontal)
@@ -123,27 +124,76 @@ struct HorizontalCollapsed: View {
     }
 }
 
+/// The side-docked notch. The time is sized from the notch's depth; once the notch is long
+/// enough to hold time and battery side by side without crowding, they run along the edge
+/// (letters facing the edge), otherwise they stack upright.
 private struct VerticalCollapsed: View {
     @ObservedObject var stats: SystemStats
+    /// Layout size before scaling: `width` is the depth, `height` the length along the edge.
+    let size: CGSize
+    let edge: NotchEdge
+
+    private var timeSize: CGFloat { min(max(size.width * 0.52, 12), 24) }
+
+    private var runsAlongEdge: Bool {
+        // Time, battery glyph and percentage, plus padding, with room to breathe.
+        let needed = timeSize * 2.9 + timeSize * 0.62 * 4.4 + 40
+        return size.height >= needed * 1.25
+    }
 
     var body: some View {
-        VStack(spacing: 12) {
-            Ring(value: stats.battery, tint: stats.batteryTint, lineWidth: 2.5)
-                .frame(width: 15, height: 15)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                VStack(spacing: 1) {
-                    Text(context.date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)))
-                    Text(context.date, format: .dateTime.minute(.twoDigits))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if runsAlongEdge {
+                alongEdge(context.date)
+            } else {
+                stacked(context.date)
             }
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.94))
-            Circle()
-                .fill(.white.opacity(0.35))
-                .frame(width: 4, height: 4)
         }
+        .monospacedDigit()
+        .foregroundStyle(.white)
+    }
+
+    private func stacked(_ date: Date) -> some View {
+        let font = timeSize
+        let showsPercent = size.height >= font * 5.4 + 24
+        return VStack(spacing: font * 0.4) {
+            Ring(value: stats.battery, tint: stats.batteryTint, lineWidth: max(2, font * 0.13))
+                .frame(width: font * 0.9, height: font * 0.9)
+            VStack(spacing: -font * 0.14) {
+                Text(date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)))
+                Text(date, format: .dateTime.minute(.twoDigits))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+            .font(.system(size: font, weight: .bold, design: .rounded))
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            if showsPercent {
+                Text("\(stats.batteryPercent)%")
+                    .font(.system(size: font * 0.52, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+        }
+        .padding(.horizontal, 3)
+    }
+
+    private func alongEdge(_ date: Date) -> some View {
+        let font = timeSize
+        return HStack(spacing: 6) {
+            Text(date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
+                .font(.system(size: font, weight: .bold, design: .rounded))
+            Spacer(minLength: 10)
+            Image(systemName: stats.batterySymbol)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(stats.batteryTint)
+            Text("\(stats.batteryPercent)%")
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .font(.system(size: font * 0.62, weight: .semibold, design: .rounded))
+        .lineLimit(1)
+        .padding(.horizontal, 16)
+        .frame(width: size.height, height: size.width)
+        .rotationEffect(.degrees(edge == .left ? -90 : 90))
+        .frame(width: size.width, height: size.height)
     }
 }
 
@@ -369,7 +419,7 @@ private struct QuickAction: Identifiable {
         QuickAction(symbol: "folder.fill", title: "Finder", bundleID: "com.apple.finder"),
         QuickAction(symbol: "camera.viewfinder", title: "Capture", bundleID: "com.apple.screenshot.launcher"),
         QuickAction(symbol: "calendar", title: "Calendar", bundleID: "com.apple.iCal"),
-        QuickAction(symbol: "switch.2", title: "System", bundleID: "com.apple.systempreferences"),
+        QuickAction(symbol: "gearshape.fill", title: "System", bundleID: "com.apple.systempreferences"),
     ]
 
     func perform() {
