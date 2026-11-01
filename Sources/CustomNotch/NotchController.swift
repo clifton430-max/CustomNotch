@@ -47,8 +47,12 @@ final class NotchController: NSObject {
     let stats = SystemStats()
     let settings = NotchSettings()
     private lazy var settingsWindow = SettingsWindowController(settings: settings, stats: stats)
-    private var sizing = NotchSizing.standard
+    private lazy var detailPanel = ResourceDetailController(stats: stats)
+    /// Per-edge sizes, mirrored from `settings` (its publisher fires before the value lands).
+    private var sizes: [NotchEdge: NotchSizing] = [:]
     private var sizingObserver: AnyCancellable?
+    /// The size for whichever edge the notch is on, or heading to while dragged.
+    private var sizing: NotchSizing { sizes[edge] ?? .standard }
 
     private let canvas = NotchMetrics.canvas
     private var panel: NotchPanel!
@@ -75,7 +79,10 @@ final class NotchController: NSObject {
     private var isSpringing: Bool { displayLink != nil }
 
     // Hover.
+    /// Runs only while the cursor is near the notch or something is in motion; mouse-move
+    /// monitors wake it, so an idle notch costs no timer wakeups.
     private var hoverTimer: Timer?
+    private var moveMonitors: [Any] = []
     private var insideSince: CFTimeInterval?
     private var outsideSince: CFTimeInterval?
     private var suppressHoverUntilExit = false
@@ -98,11 +105,11 @@ final class NotchController: NSObject {
         host.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
         panel.contentView = host
         model.openSettings = { [weak self] in self?.openSettings() }
+        model.openDetail = { [weak self] kind in self?.openDetail(kind) }
 
-        sizing = settings.sizing
-        // `$sizing` fires before the stored value changes, so use the value it delivers.
-        sizingObserver = settings.$sizing.removeDuplicates().dropFirst().sink { [weak self] new in
-            self?.sizingChanged(to: new)
+        sizes = settings.sizes
+        sizingObserver = settings.$sizes.removeDuplicates().dropFirst().sink { [weak self] new in
+            self?.sizesChanged(to: new)
         }
 
         restorePosition()
@@ -117,11 +124,15 @@ final class NotchController: NSObject {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             MainActor.assumeIsolated { self?.handle(event) ?? event }
         }
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pollHover() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        hoverTimer = timer
+        let moves: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: moves, handler: { [weak self] _ in
+            MainActor.assumeIsolated { self?.mouseMoved() }
+        }) { moveMonitors.append(global) }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: moves, handler: { [weak self] event in
+            MainActor.assumeIsolated { self?.mouseMoved() }
+            return event
+        }) { moveMonitors.append(local) }
+        wakeHover()
 
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -156,9 +167,20 @@ final class NotchController: NSObject {
         settingsWindow.show()
     }
 
-    private func sizingChanged(to new: NotchSizing) {
-        sizing = new
-        guard !isDragging else { return }
+    func openDetail(_ kind: ResourceKind) {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(attachPoint) })
+            ?? NSScreen.screens.first else { return }
+        // Place the panel against the opened notch, which stays open while the panel shows.
+        if !model.isExpanded { expand() }
+        let rect = bodyRect.offsetBy(dx: windowAnchor.x, dy: windowAnchor.y)
+        detailPanel.show(kind, beside: rect, edge: edge, on: screen)
+    }
+
+    private func sizesChanged(to new: [NotchEdge: NotchSizing]) {
+        let old = sizing
+        sizes = new
+        // Only the edge the notch is on affects it; other edges' presets wait until it moves there.
+        guard sizing != old, !isDragging else { return }
         // Re-attach so the resized notch still fits its edge, gliding there if it had to move.
         let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(attachPoint) })
             ?? NSScreen.screens.first
@@ -245,6 +267,7 @@ final class NotchController: NSObject {
     private func attach(edge newEdge: NotchEdge, screen: NSScreen, along: CGFloat) {
         let f = screen.frame
         edge = newEdge
+        if settings.dockedEdge != newEdge { settings.dockedEdge = newEdge }
         alongRange = allowedRange(edge: newEdge, screen: screen, near: along)
         let collapsed = sizing.collapsed(horizontal: newEdge.isHorizontal)
         let span = newEdge.isHorizontal ? collapsed.width : collapsed.height
@@ -287,6 +310,8 @@ final class NotchController: NSObject {
             radius = (isExpanded ? 32 : 14) * sizing.scale
         }
         bodyRect = rect
+        // Poll system stats only while the notch is open (the detail panel keeps it open).
+        stats.setLive(isExpanded)
 
         let center = CGPoint(x: canvas / 2 + rect.midX, y: canvas / 2 - rect.midY)
         let update = {
@@ -340,6 +365,7 @@ final class NotchController: NSObject {
 
     private func beginDrag(at p: CGPoint) {
         stopSpring()
+        detailPanel.close()
         let visual = bodyRect.offsetBy(dx: windowAnchor.x, dy: windowAnchor.y)
         isDragging = true
         insideSince = nil
@@ -374,9 +400,9 @@ final class NotchController: NSObject {
         guard let screen = screen(containing: p) else { return }
         let (nearest, distance) = nearestEdge(to: p, in: screen.frame)
         if distance < 150, nearest != edge {
-            let flips = nearest.isHorizontal != edge.isHorizontal
+            // Morph into the destination edge's saved size and orientation on the way there.
             edge = nearest
-            if flips { applyLayout(Anim.lift) }
+            applyLayout(Anim.lift)
         }
     }
 
@@ -396,6 +422,7 @@ final class NotchController: NSObject {
         startSpring()
         applyLayout(Anim.snap, expanded: false)
         suppressHoverUntilExit = true
+        wakeHover()
         savePosition(screen: screen)
     }
 
@@ -468,6 +495,7 @@ final class NotchController: NSObject {
         if distance < 0.3, hypot(springVelocity.dx, springVelocity.dy) < 4 {
             moveWindow(to: attachPoint)
             stopSpring()
+            wakeHover()
         } else {
             windowAnchor = pos
             panel.setFrameOrigin(CGPoint(x: pos.x - canvas / 2, y: pos.y - canvas / 2))
@@ -476,11 +504,41 @@ final class NotchController: NSObject {
 
     // MARK: Hover
 
+    private var hoverRect: CGRect {
+        bodyRect.offsetBy(dx: windowAnchor.x, dy: windowAnchor.y).insetBy(dx: -2, dy: -2)
+    }
+
+    private func mouseMoved() {
+        // Only bother when the cursor comes near the notch or the notch needs watching.
+        if hoverTimer == nil, !needsHoverTimer { return }
+        wakeHover()
+    }
+
+    private var needsHoverTimer: Bool {
+        model.isExpanded || isDragging || isSpringing || insideSince != nil || outsideSince != nil
+            || suppressHoverUntilExit || hoverRect.insetBy(dx: -60, dy: -60).contains(NSEvent.mouseLocation)
+    }
+
+    private func wakeHover() {
+        pollHover()
+        guard hoverTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pollHover()
+                if !self.needsHoverTimer {
+                    self.hoverTimer?.invalidate()
+                    self.hoverTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTimer = timer
+    }
+
     private func pollHover() {
         guard !isDragging, panel != nil else { return }
-        let mouse = NSEvent.mouseLocation
-        let rect = bodyRect.offsetBy(dx: windowAnchor.x, dy: windowAnchor.y).insetBy(dx: -2, dy: -2)
-        let inside = rect.contains(mouse)
+        let inside = hoverRect.contains(NSEvent.mouseLocation)
         if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
 
         if suppressHoverUntilExit {
@@ -500,7 +558,7 @@ final class NotchController: NSObject {
             }
         } else {
             insideSince = nil
-            guard model.isExpanded, !model.isPinned else { return }
+            guard model.isExpanded, !model.isPinned, !detailPanel.isVisible else { return }
             if let since = outsideSince {
                 if now - since > 0.28 { collapse() }
             } else {
@@ -552,13 +610,20 @@ final class NotchController: NSObject {
         guard let s = note.object as? String else { return openSettings() }
         let v = s.split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) }
         guard v.count == 3 else { return }
-        settings.sizing = NotchSizing(width: v[0], height: v[1], scale: v[2])
+        settings.setSizing(NotchSizing(width: v[0], height: v[1], scale: v[2]), for: edge)
     }
 
     func installDebugHooks() {
         let center = DistributedNotificationCenter.default()
         center.addObserver(self, selector: #selector(debugThrow(_:)), name: .init("CustomNotch.debugThrow"), object: nil)
         center.addObserver(self, selector: #selector(debugSize(_:)), name: .init("CustomNotch.debugSize"), object: nil)
+        center.addObserver(self, selector: #selector(debugDetail(_:)), name: .init("CustomNotch.debugDetail"), object: nil)
+    }
+
+    /// "CustomNotch.debugDetail" with "cpu", "memory" or "battery" opens the notch and that panel.
+    @objc private func debugDetail(_ note: Notification) {
+        guard let kind = (note.object as? String).flatMap(ResourceKind.init(rawValue:)) else { return detailPanel.close() }
+        openDetail(kind)
     }
     #endif
 

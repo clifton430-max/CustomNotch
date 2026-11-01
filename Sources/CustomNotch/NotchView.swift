@@ -27,7 +27,6 @@ struct NotchRootView: View {
         .frame(width: model.bodySize.width + pad * 2, height: model.bodySize.height + pad * 2)
         .scaleEffect(model.isAppeared ? (model.isFloating ? 1.05 : 1) : 0.35, anchor: model.edge.unitPoint)
         .opacity(model.isAppeared ? 1 : 0)
-        .blur(radius: model.isAppeared ? 0 : 8)
         .position(model.bodyCenter)
         .frame(width: NotchMetrics.canvas, height: NotchMetrics.canvas)
         .environment(\.colorScheme, .dark)
@@ -87,7 +86,8 @@ private extension View {
     }
 }
 
-/// Fades, de-blurs and gently scales content in from the attached edge.
+/// Fades and gently scales content in from the attached edge. (No blur: a blur left at
+/// radius 0 keeps the content rendering on the CPU.)
 private struct Reveal: ViewModifier {
     var progress: CGFloat
     var anchor: UnitPoint
@@ -95,7 +95,6 @@ private struct Reveal: ViewModifier {
     func body(content: Content) -> some View {
         content
             .opacity(progress)
-            .blur(radius: (1 - progress) * 10)
             .scaleEffect(0.9 + 0.1 * progress, anchor: anchor)
     }
 }
@@ -113,7 +112,7 @@ struct HorizontalCollapsed: View {
             Text("\(stats.batteryPercent)%")
                 .foregroundStyle(.white.opacity(0.7))
             Spacer(minLength: 8)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(.everyMinute) { context in
                 Text(context.date, format: .dateTime.hour().minute())
             }
         }
@@ -127,7 +126,7 @@ struct HorizontalCollapsed: View {
 /// The side-docked notch. The time is sized from the notch's depth; once the notch is long
 /// enough to hold time and battery side by side without crowding, they run along the edge
 /// (letters facing the edge), otherwise they stack upright.
-private struct VerticalCollapsed: View {
+struct VerticalCollapsed: View {
     @ObservedObject var stats: SystemStats
     /// Layout size before scaling: `width` is the depth, `height` the length along the edge.
     let size: CGSize
@@ -142,7 +141,7 @@ private struct VerticalCollapsed: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.everyMinute) { context in
             if runsAlongEdge {
                 alongEdge(context.date)
             } else {
@@ -209,7 +208,7 @@ private struct HorizontalExpanded: View {
             HStack(alignment: .center, spacing: 12) {
                 ClockBlock(stats: stats)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                StatRings(stats: stats, size: 42)
+                StatRings(model: model, stats: stats, size: 42)
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 70)
                 ActionGrid(showsLabels: false)
             }
@@ -228,7 +227,7 @@ private struct VerticalExpanded: View {
         VStack(alignment: .leading, spacing: 20) {
             ExpandedHeader(model: model)
             ClockBlock(stats: stats)
-            StatRings(stats: stats, size: 52)
+            StatRings(model: model, stats: stats, size: 52)
                 .frame(maxWidth: .infinity)
             ActionGrid(showsLabels: true)
                 .frame(maxWidth: .infinity)
@@ -246,7 +245,7 @@ private struct ExpandedHeader: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            TimelineView(.periodic(from: .now, by: 60)) { context in
+            TimelineView(.everyMinute) { context in
                 Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
                     .lineLimit(1)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
@@ -261,7 +260,6 @@ private struct ExpandedHeader: View {
             }
             .opacity(showsControls ? 1 : 0)
             .scaleEffect(showsControls ? 1 : 0.5)
-            .blur(radius: showsControls ? 0 : 3)
         }
         .frame(height: 20)
         .onAppear {
@@ -299,7 +297,7 @@ private struct ClockBlock: View {
     @ObservedObject var stats: SystemStats
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        TimelineView(.everyMinute) { context in
             VStack(alignment: .leading, spacing: 2) {
                 let time = context.date.formatted(.dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
                 Text(time)
@@ -338,7 +336,19 @@ private struct PinButton: View {
 
 // MARK: - Stats
 
+extension ResourceKind {
+    /// Shared by the notch's rings and the detail panel so each resource keeps one colour.
+    var tint: Color {
+        switch self {
+        case .cpu: Color(red: 0.25, green: 0.65, blue: 1)
+        case .memory: Color(red: 0.72, green: 0.45, blue: 1)
+        case .battery: Color(red: 0.30, green: 0.85, blue: 0.45)
+        }
+    }
+}
+
 private struct StatRings: View {
+    @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
     let size: CGFloat
 
@@ -346,23 +356,33 @@ private struct StatRings: View {
         HStack(spacing: 12) {
             StatRing(value: stats.battery, label: "Battery",
                      symbol: stats.isCharging ? "bolt.fill" : nil,
-                     tint: Color(red: 0.30, green: 0.85, blue: 0.45), size: size)
+                     tint: ResourceKind.battery.tint, size: size) { model.openDetail(.battery) }
             StatRing(value: stats.cpu, label: "CPU", symbol: nil,
-                     tint: Color(red: 0.25, green: 0.65, blue: 1), size: size)
+                     tint: ResourceKind.cpu.tint, size: size) { model.openDetail(.cpu) }
             StatRing(value: stats.memory, label: "Memory", symbol: nil,
-                     tint: Color(red: 0.72, green: 0.45, blue: 1), size: size)
+                     tint: ResourceKind.memory.tint, size: size) { model.openDetail(.memory) }
         }
     }
 }
 
+/// A ring that opens its resource's detail panel when clicked.
 private struct StatRing: View {
     let value: Double
     let label: String
     let symbol: String?
     let tint: Color
     let size: CGFloat
+    let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
+        Button(action: action) { content }
+            .buttonStyle(PressableStyle())
+            .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
+            .help("Show \(label) details")
+    }
+
+    private var content: some View {
         VStack(spacing: 6) {
             ZStack {
                 Ring(value: value, tint: tint, lineWidth: 4.5)
@@ -379,16 +399,25 @@ private struct StatRing: View {
                 }
             }
             .frame(width: size, height: size)
-            Text(label)
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.5))
-                .fixedSize()
+            .background(Circle().fill(tint.opacity(hovering ? 0.16 : 0)).padding(-5))
+            .scaleEffect(hovering ? 1.06 : 1)
+            HStack(spacing: 2) {
+                Text(label)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 7, weight: .bold))
+                    .opacity(hovering ? 1 : 0)
+                    .frame(width: hovering ? 7 : 0)
+            }
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(hovering ? 0.9 : 0.5))
+            .fixedSize()
         }
+        .contentShape(Rectangle())
         .animation(.smooth(duration: 0.6), value: value)
     }
 }
 
-private struct Ring: View {
+struct Ring: View {
     let value: Double
     let tint: Color
     let lineWidth: CGFloat
@@ -396,12 +425,10 @@ private struct Ring: View {
     var body: some View {
         ZStack {
             Circle().stroke(tint.opacity(0.18), lineWidth: lineWidth)
+            // A solid stroke; an angular gradient here is shaded on the CPU every frame.
             Circle()
                 .trim(from: 0, to: max(0.001, min(1, value)))
-                .stroke(
-                    AngularGradient(colors: [tint.opacity(0.7), tint], center: .center,
-                                    startAngle: .degrees(0), endAngle: .degrees(360 * max(0.001, value))),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
     }

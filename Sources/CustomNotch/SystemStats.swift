@@ -2,7 +2,23 @@ import Darwin
 import IOKit.ps
 import SwiftUI
 
-/// Battery, CPU and memory readings, refreshed every couple of seconds.
+/// Memory split the way Activity Monitor reports it, in bytes.
+struct MemoryBreakdown: Equatable {
+    var app: Double = 0
+    var wired: Double = 0
+    var compressed: Double = 0
+    var cached: Double = 0
+    var total: Double = Double(ProcessInfo.processInfo.physicalMemory)
+    var swapUsed: Double = 0
+    /// 0 when memory is plentiful, approaching 1 under heavy pressure.
+    var pressure: Double = 0
+
+    var used: Double { app + wired + compressed }
+}
+
+/// Battery, CPU and memory readings. They refresh live only while the notch is open (see
+/// `setLive`); otherwise the last values stay put and only battery changes, which macOS
+/// announces, are picked up.
 @MainActor
 final class SystemStats: ObservableObject {
     @Published private(set) var battery: Double = 1
@@ -10,14 +26,52 @@ final class SystemStats: ObservableObject {
     @Published private(set) var onAC = false
     @Published private(set) var cpu: Double = 0
     @Published private(set) var memory: Double = 0
+    @Published private(set) var cpuUser: Double = 0
+    @Published private(set) var cpuSystem: Double = 0
+    /// Recent total CPU readings, oldest first (about two minutes' worth).
+    @Published private(set) var cpuHistory: [Double] = []
+    @Published private(set) var memoryBreakdown = MemoryBreakdown()
 
     private var lastTicks: [UInt32]?
     private var timer: Timer?
+    private var isLive = false
+    private var powerSource: CFRunLoopSource?
 
     init() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+        // The collapsed notch shows battery, so follow power changes without polling.
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        powerSource = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let stats = Unmanaged<SystemStats>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { stats.readBattery() }
+        }, context)?.takeRetainedValue()
+        if let powerSource { CFRunLoopAddSource(CFRunLoopGetMain(), powerSource, .commonModes) }
+    }
+
+    /// Starts or pauses live polling. Resuming refreshes battery and memory at once and takes
+    /// a fresh CPU reading a moment later, so nothing is shown averaged over the pause.
+    func setLive(_ live: Bool) {
+        guard live != isLive else { return }
+        isLive = live
+        timer?.invalidate()
+        timer = nil
+        guard live else { return }
+
+        readBattery()
+        readMemory()
+        lastTicks = currentTicks()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isLive else { return }
+                self.refresh()
+                let repeating = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refresh() }
+                }
+                repeating.tolerance = 0.3
+                RunLoop.main.add(repeating, forMode: .common)
+                self.timer = repeating
+            }
         }
     }
 
@@ -66,15 +120,7 @@ final class SystemStats: ObservableObject {
     }
 
     private func readCPU() {
-        var info = host_cpu_load_info()
-        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.stride / MemoryLayout<integer_t>.stride)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return }
-        let ticks = [info.cpu_ticks.0, info.cpu_ticks.1, info.cpu_ticks.2, info.cpu_ticks.3]
+        guard let ticks = currentTicks() else { return }
         defer { lastTicks = ticks }
         guard let last = lastTicks else { return }
         let delta = zip(ticks, last).map { Double($0 &- $1) }
@@ -82,6 +128,22 @@ final class SystemStats: ObservableObject {
         guard total > 0 else { return }
         // Order is user, system, idle, nice.
         cpu = (total - delta[2]) / total
+        cpuUser = (delta[0] + delta[3]) / total
+        cpuSystem = delta[1] / total
+        cpuHistory.append(cpu)
+        if cpuHistory.count > 60 { cpuHistory.removeFirst(cpuHistory.count - 60) }
+    }
+
+    private func currentTicks() -> [UInt32]? {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return [info.cpu_ticks.0, info.cpu_ticks.1, info.cpu_ticks.2, info.cpu_ticks.3]
     }
 
     private func readMemory() {
@@ -93,8 +155,25 @@ final class SystemStats: ObservableObject {
             }
         }
         guard result == KERN_SUCCESS else { return }
-        let pages = Double(stats.active_count) + Double(stats.wire_count) + Double(stats.compressor_page_count)
-        let used = pages * Double(vm_kernel_page_size)
-        memory = min(1, used / Double(ProcessInfo.processInfo.physicalMemory))
+        let page = Double(vm_kernel_page_size)
+        var breakdown = MemoryBreakdown()
+        breakdown.app = max(0, Double(stats.internal_page_count) - Double(stats.purgeable_count)) * page
+        breakdown.wired = Double(stats.wire_count) * page
+        breakdown.compressed = Double(stats.compressor_page_count) * page
+        breakdown.cached = (Double(stats.external_page_count) + Double(stats.purgeable_count)) * page
+
+        var swap = xsw_usage()
+        var swapSize = MemoryLayout<xsw_usage>.size
+        if sysctlbyname("vm.swapusage", &swap, &swapSize, nil, 0) == 0 {
+            breakdown.swapUsed = Double(swap.xsu_used)
+        }
+        var level: Int32 = 100
+        var levelSize = MemoryLayout<Int32>.size
+        if sysctlbyname("kern.memorystatus_level", &level, &levelSize, nil, 0) == 0 {
+            breakdown.pressure = max(0, min(1, 1 - Double(level) / 100))
+        }
+
+        memoryBreakdown = breakdown
+        memory = min(1, breakdown.used / breakdown.total)
     }
 }

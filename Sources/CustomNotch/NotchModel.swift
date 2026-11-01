@@ -1,9 +1,20 @@
 import SwiftUI
 
-enum NotchEdge: String, CaseIterable {
+enum NotchEdge: String, CaseIterable, Codable {
     case top, bottom, left, right
 
     var isHorizontal: Bool { self == .top || self == .bottom }
+
+    var title: String { rawValue.capitalized }
+
+    var symbol: String {
+        switch self {
+        case .top: "arrow.up.to.line"
+        case .bottom: "arrow.down.to.line"
+        case .left: "arrow.left.to.line"
+        case .right: "arrow.right.to.line"
+        }
+    }
 
     var alignment: Alignment {
         switch self {
@@ -44,7 +55,7 @@ enum NotchMetrics {
 /// User-adjustable notch dimensions, as multipliers of the defaults in `NotchMetrics`.
 /// `width` runs along the attached edge and `height` away from it, so they follow the notch
 /// when it rotates onto a side edge. `scale` enlarges everything, opened panel included.
-struct NotchSizing: Equatable {
+struct NotchSizing: Equatable, Codable {
     var width: CGFloat = 1
     var height: CGFloat = 1
     var scale: CGFloat = 1
@@ -53,6 +64,12 @@ struct NotchSizing: Equatable {
     static let widthRange: ClosedRange<CGFloat> = 0.6...1.6
     static let heightRange: ClosedRange<CGFloat> = 0.7...1.6
     static let scaleRange: ClosedRange<CGFloat> = 0.8...1.25
+
+    func clamped() -> NotchSizing {
+        func clamp(_ v: CGFloat, _ r: ClosedRange<CGFloat>) -> CGFloat { min(max(v, r.lowerBound), r.upperBound) }
+        return NotchSizing(width: clamp(width, Self.widthRange), height: clamp(height, Self.heightRange),
+                           scale: clamp(scale, Self.scaleRange))
+    }
 
     /// Collapsed size before `scale`; collapsed content is laid out at this size, then scaled.
     func collapsedLayout(horizontal: Bool) -> CGSize {
@@ -76,28 +93,49 @@ struct NotchSizing: Equatable {
 /// Persisted notch preferences, edited live from the Notch Settings window.
 @MainActor
 final class NotchSettings: ObservableObject {
-    @Published var sizing: NotchSizing {
+    /// Each edge keeps its own dimensions; resizing while docked somewhere only changes that
+    /// edge's entry.
+    @Published private(set) var sizes: [NotchEdge: NotchSizing] {
         didSet { save() }
     }
+    /// Where the notch is docked right now. Kept current by `NotchController`.
+    @Published var dockedEdge: NotchEdge = .right
+
+    private static let sizesKey = "edgeSizes"
 
     init() {
         let d = UserDefaults.standard
-        func value(_ key: String, _ range: ClosedRange<CGFloat>) -> CGFloat {
-            guard let v = d.object(forKey: key) as? Double else { return 1 }
-            return min(max(CGFloat(v), range.lowerBound), range.upperBound)
+        if let data = d.data(forKey: Self.sizesKey),
+           let stored = try? JSONDecoder().decode([String: NotchSizing].self, from: data) {
+            var loaded: [NotchEdge: NotchSizing] = [:]
+            for edge in NotchEdge.allCases {
+                loaded[edge] = stored[edge.rawValue]?.clamped() ?? .standard
+            }
+            sizes = loaded
+        } else {
+            // Earlier versions kept one size for every edge; start each edge from it.
+            func legacy(_ key: String) -> CGFloat { (d.object(forKey: key) as? Double).map { CGFloat($0) } ?? 1 }
+            let shared = NotchSizing(width: legacy("sizeWidth"), height: legacy("sizeHeight"),
+                                     scale: legacy("sizeScale")).clamped()
+            sizes = Dictionary(uniqueKeysWithValues: NotchEdge.allCases.map { ($0, shared) })
         }
-        sizing = NotchSizing(width: value("sizeWidth", NotchSizing.widthRange),
-                             height: value("sizeHeight", NotchSizing.heightRange),
-                             scale: value("sizeScale", NotchSizing.scaleRange))
     }
 
-    func reset() { sizing = .standard }
+    func sizing(for edge: NotchEdge) -> NotchSizing { sizes[edge] ?? .standard }
+
+    func setSizing(_ sizing: NotchSizing, for edge: NotchEdge) {
+        let clamped = sizing.clamped()
+        guard sizes[edge] != clamped else { return }
+        sizes[edge] = clamped
+    }
+
+    func reset(_ edge: NotchEdge) { setSizing(.standard, for: edge) }
 
     private func save() {
-        let d = UserDefaults.standard
-        d.set(Double(sizing.width), forKey: "sizeWidth")
-        d.set(Double(sizing.height), forKey: "sizeHeight")
-        d.set(Double(sizing.scale), forKey: "sizeScale")
+        let stored = Dictionary(uniqueKeysWithValues: sizes.map { ($0.key.rawValue, $0.value) })
+        if let data = try? JSONEncoder().encode(stored) {
+            UserDefaults.standard.set(data, forKey: Self.sizesKey)
+        }
     }
 }
 
@@ -117,4 +155,5 @@ final class NotchModel: ObservableObject {
     @Published var sizing = NotchSizing.standard
 
     var openSettings: () -> Void = {}
+    var openDetail: (ResourceKind) -> Void = { _ in }
 }

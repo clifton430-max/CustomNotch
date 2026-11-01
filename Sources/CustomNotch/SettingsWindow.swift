@@ -21,7 +21,9 @@ final class SettingsWindowController {
             w.titleVisibility = .hidden
             w.titlebarAppearsTransparent = true
             w.appearance = NSAppearance(named: .darkAqua)
-            w.backgroundColor = NSColor(white: 0.055, alpha: 1)
+            // Clear so the SwiftUI glass can blur the desktop behind the window.
+            w.isOpaque = false
+            w.backgroundColor = .clear
             w.isReleasedWhenClosed = false
             w.animationBehavior = .alertPanel
             w.level = .floating
@@ -49,7 +51,7 @@ final class SettingsWindowController {
             frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
         }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.34
+            context.duration = 0.36
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
             w.animator().setFrame(frame, display: true)
         }
@@ -58,55 +60,35 @@ final class SettingsWindowController {
 
 // MARK: - Navigation
 
-/// Every settings page. Adding a page means adding a case here, a `SettingsCategory` entry
-/// pointing at it, and a branch in `SettingsView.page(for:)`.
+/// Every settings page. Adding a page means adding a case here, a row on the home page that
+/// opens it, and a branch in `SettingsView.page(for:)`.
 enum SettingsRoute: Hashable {
     case home
     case appearance
 
+    var title: String {
+        switch self {
+        case .home: "Notch Settings"
+        case .appearance: "Appearance & Size"
+        }
+    }
+
     var windowSize: CGSize {
         switch self {
-        case .home: CGSize(width: 460, height: 420)
-        case .appearance: CGSize(width: 720, height: 650)
+        case .home: CGSize(width: 500, height: 624)
+        case .appearance: CGSize(width: 760, height: 668)
         }
     }
 }
 
-private struct SettingsCategory: Identifiable {
-    let route: SettingsRoute
-    let title: String
-    let symbol: String
-    let tint: [Color]
-    let detail: @MainActor (NotchSettings) -> String
-    var id: SettingsRoute { route }
-}
-
-private struct SettingsGroup: Identifiable {
-    let title: String
-    let categories: [SettingsCategory]
-    var id: String { title }
-
-    static let all = [
-        SettingsGroup(title: "Notch", categories: [
-            SettingsCategory(route: .appearance, title: "Notch Appearance & Size",
-                             symbol: "rectangle.topthird.inset.filled",
-                             tint: [Color(red: 0.45, green: 0.4, blue: 1), Color(red: 0.75, green: 0.35, blue: 0.95)]) { settings in
-                let s = settings.sizing
-                return "Width \(percent(s.width)) · Height \(percent(s.height)) · Size \(percent(s.scale))"
-            },
-        ]),
-    ]
-}
-
-private func percent(_ value: CGFloat) -> String { "\(Int((value * 100).rounded()))%" }
-
 private enum Theme {
-    static let background = Color(white: 0.055)
-    static let card = Color(white: 0.1)
-    static let stroke = Color.white.opacity(0.07)
-    static let secondary = Color.white.opacity(0.5)
-    static let tertiary = Color.white.opacity(0.3)
-    static let pageAnimation = Animation.spring(response: 0.42, dampingFraction: 0.9)
+    static let secondary = Color.white.opacity(0.55)
+    static let tertiary = Color.white.opacity(0.35)
+    static let separator = Color.white.opacity(0.08)
+    static let page = Animation.spring(response: 0.44, dampingFraction: 0.9)
+    static let control = Animation.spring(response: 0.32, dampingFraction: 0.82)
+    static let violet = [Color(red: 0.47, green: 0.42, blue: 1), Color(red: 0.74, green: 0.36, blue: 0.96)]
+    static let graphite = [Color(white: 0.42), Color(white: 0.24)]
 }
 
 private struct SettingsView: View {
@@ -116,22 +98,32 @@ private struct SettingsView: View {
 
     @State private var route: SettingsRoute = .home
     @State private var forward = true
+    @State private var editingEdge: NotchEdge = .right
 
     var body: some View {
-        ZStack(alignment: .top) {
-            Theme.background.ignoresSafeArea()
-            page(for: route)
-                .id(route)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .transition(.asymmetric(
-                    insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity),
-                    removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity)))
+        VStack(spacing: 0) {
+            Toolbar(route: route) { navigate(to: .home) }
+            ZStack(alignment: .top) {
+                page(for: route)
+                    .id(route)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .transition(.asymmetric(
+                        insertion: .offset(x: forward ? 60 : -60).combined(with: .opacity),
+                        removal: .offset(x: forward ? -60 : 60).combined(with: .opacity)))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
         }
-        .clipped()
+        .foregroundStyle(.white)
+        .background(GlassBackground(tint: 0.5).ignoresSafeArea())
         .environment(\.colorScheme, .dark)
         #if DEBUG
-        .onReceive(DistributedNotificationCenter.default().publisher(for: .init("CustomNotch.debugRoute"))) { _ in
-            navigate(to: route == .home ? .appearance : .home)
+        .onReceive(DistributedNotificationCenter.default().publisher(for: .init("CustomNotch.debugRoute"))) { note in
+            if let edge = (note.object as? String).flatMap(NotchEdge.init(rawValue:)) {
+                navigate(to: .appearance, editing: edge)
+            } else {
+                navigate(to: route == .home ? .appearance : .home)
+            }
         }
         #endif
     }
@@ -140,242 +132,47 @@ private struct SettingsView: View {
     private func page(for route: SettingsRoute) -> some View {
         switch route {
         case .home:
-            HomePage(settings: settings, open: navigate)
+            HomePage(settings: settings, stats: stats) { edge in navigate(to: .appearance, editing: edge) }
         case .appearance:
-            AppearancePage(settings: settings, stats: stats) { navigate(to: .home) }
+            AppearancePage(settings: settings, stats: stats, edge: $editingEdge)
         }
     }
 
-    private func navigate(to next: SettingsRoute) {
+    private func navigate(to next: SettingsRoute, editing edge: NotchEdge? = nil) {
+        guard next != route else { return }
+        if let edge { editingEdge = edge } else if next == .appearance { editingEdge = settings.dockedEdge }
         // Set the direction first so the outgoing page picks up the matching transition.
         forward = next != .home
         resizeWindow(next.windowSize)
         DispatchQueue.main.async {
-            withAnimation(Theme.pageAnimation) { route = next }
+            withAnimation(Theme.page) { route = next }
         }
     }
 }
 
-// MARK: - Shared pieces
-
-private extension View {
-    func settingsCard() -> some View {
-        background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.card)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(LinearGradient(colors: [.white.opacity(0.13), Theme.stroke],
-                                                     startPoint: .top, endPoint: .bottom))))
-    }
-}
-
-private struct SectionLabel: View {
-    let title: String
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 11.5, weight: .semibold))
-            .textCase(.uppercase)
-            .kerning(0.4)
-            .foregroundStyle(Theme.tertiary)
-            .padding(.leading, 4)
-    }
-}
-
-private struct IconTile: View {
-    let symbol: String
-    let tint: [Color]
-    var size: CGFloat = 30
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-            .fill(LinearGradient(colors: tint, startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(
-                RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
-                    .strokeBorder(.white.opacity(0.18)))
-            .overlay(
-                Image(systemName: symbol)
-                    .font(.system(size: size * 0.47, weight: .semibold))
-                    .foregroundStyle(.white))
-            .frame(width: size, height: size)
-    }
-}
-
-private struct PressStyle: ButtonStyle {
-    var scale: CGFloat = 0.97
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? scale : 1)
-            .animation(.spring(response: 0.25, dampingFraction: 0.65), value: configuration.isPressed)
-    }
-}
-
-// MARK: - Home
-
-private struct HomePage: View {
-    @ObservedObject var settings: NotchSettings
-    let open: (SettingsRoute) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            HStack(spacing: 14) {
-                AppGlyph()
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Notch Settings")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                    Text("Customize how your notch looks and behaves")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Theme.secondary)
-                }
-            }
-
-            ForEach(SettingsGroup.all) { group in
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(title: group.title)
-                    VStack(spacing: 0) {
-                        ForEach(Array(group.categories.enumerated()), id: \.element.id) { index, category in
-                            if index > 0 {
-                                Rectangle().fill(Theme.stroke).frame(height: 1).padding(.leading, 56)
-                            }
-                            CategoryRow(category: category, detail: category.detail(settings)) {
-                                open(category.route)
-                            }
-                        }
-                    }
-                    .padding(4)
-                    .settingsCard()
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Text("CustomNotch 1.0")
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(Theme.tertiary)
-                .frame(maxWidth: .infinity)
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 26)
-        .padding(.top, 46)
-        .padding(.bottom, 18)
-    }
-}
-
-private struct AppGlyph: View {
-    var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(LinearGradient(colors: [Color(white: 0.2), Color(white: 0.08)], startPoint: .top, endPoint: .bottom))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.14)))
-            .overlay(alignment: .top) {
-                NotchShape(edge: .top, ear: 3, radius: 5, pad: 3)
-                    .fill(Color.black)
-                    .overlay(NotchShape(edge: .top, ear: 3, radius: 5, pad: 3).stroke(.white.opacity(0.25), lineWidth: 0.5))
-                    .frame(width: 30, height: 16)
-                    .padding(.top, -3)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .frame(width: 46, height: 46)
-            .shadow(color: .black.opacity(0.4), radius: 6, y: 3)
-    }
-}
-
-private struct CategoryRow: View {
-    let category: SettingsCategory
-    let detail: String
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                IconTile(symbol: category.symbol, tint: category.tint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(category.title)
-                        .font(.system(size: 13.5, weight: .semibold))
-                    Text(detail)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.secondary)
-                        .contentTransition(.numericText())
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(hovering ? Color.white.opacity(0.8) : Theme.tertiary)
-                    .offset(x: hovering ? 2 : 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.white.opacity(hovering ? 0.06 : 0)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressStyle(scale: 0.985))
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
-    }
-}
-
-// MARK: - Appearance & Size
-
-private struct AppearancePage: View {
-    @ObservedObject var settings: NotchSettings
-    @ObservedObject var stats: SystemStats
+/// A System Settings-style toolbar: room for the traffic lights, a back button on inner
+/// pages, and the page title.
+private struct Toolbar: View {
+    let route: SettingsRoute
     let back: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            Color.clear.frame(width: 64)
+            if route != .home {
                 BackButton(action: back)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Notch Appearance & Size")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
-                    Text("Drag the preview's edges, pinch to scale, or use the sliders")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondary)
-                }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
-
-            ResizablePreview(settings: settings, stats: stats)
-                .frame(height: 330)
-
-            HStack(spacing: 0) {
-                SizeSlider(title: "Width", symbol: "arrow.left.and.right",
-                           value: $settings.sizing.width, range: NotchSizing.widthRange)
-                ColumnDivider()
-                SizeSlider(title: "Height", symbol: "arrow.up.and.down",
-                           value: $settings.sizing.height, range: NotchSizing.heightRange)
-                ColumnDivider()
-                SizeSlider(title: "Overall Size", symbol: "arrow.up.left.and.arrow.down.right",
-                           value: $settings.sizing.scale, range: NotchSizing.scaleRange)
-            }
-            .padding(.vertical, 16)
-            .settingsCard()
-
-            HStack {
-                let size = settings.sizing.collapsed(horizontal: true)
-                Label("\(Int(size.width.rounded())) × \(Int(size.height.rounded())) pt when docked to the top",
-                      systemImage: "ruler")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Theme.secondary)
-                    .contentTransition(.numericText())
-                Spacer()
-                ResetButton(isEnabled: settings.sizing != .standard) {
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { settings.reset() }
-                }
-            }
+            Text(route.title)
+                .font(.system(size: 14, weight: .semibold))
+                .id(route)
+                .transition(.opacity.combined(with: .offset(y: 4)))
+            Spacer()
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 28)
-        .padding(.top, 40)
-        .padding(.bottom, 22)
-    }
-}
-
-private struct ColumnDivider: View {
-    var body: some View {
-        Rectangle().fill(Theme.stroke).frame(width: 1, height: 52)
+        .padding(.horizontal, 12)
+        .frame(height: 52)
+        .animation(Theme.page, value: route)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.separator).frame(height: 1) }
     }
 }
 
@@ -386,34 +183,451 @@ private struct BackButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "chevron.left")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white.opacity(hovering ? 1 : 0.75))
-                .offset(x: hovering ? -1 : 0)
-                .frame(width: 32, height: 32)
-                .background(Circle().fill(.white.opacity(hovering ? 0.14 : 0.08)))
-                .overlay(Circle().strokeBorder(.white.opacity(0.1)))
-                .contentShape(Circle())
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 24)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(hovering ? 0.12 : 0.06)))
+                .contentShape(Rectangle())
         }
-        .buttonStyle(PressStyle(scale: 0.9))
+        .buttonStyle(PressStyle(scale: 0.92))
         .keyboardShortcut("[", modifiers: .command)
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
-        .help("Back to Settings")
+        .help("Back")
+    }
+}
+
+// MARK: - Shared pieces
+
+private struct PressStyle: ButtonStyle {
+    var scale: CGFloat = 0.98
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.65), value: configuration.isPressed)
+    }
+}
+
+private extension View {
+    /// A rounded glass group, like the inset sections in System Settings.
+    func glassGroup(cornerRadius: CGFloat = 12) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [.white.opacity(0.14), .white.opacity(0.05)],
+                                                     startPoint: .top, endPoint: .bottom))))
+    }
+}
+
+private struct GroupHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Theme.secondary)
+            .padding(.leading, 6)
+    }
+}
+
+private struct IconTile: View {
+    let symbol: String
+    let colors: [Color]
+    var size: CGFloat = 24
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+            .fill(LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous).strokeBorder(.white.opacity(0.16)))
+            .overlay(
+                Image(systemName: symbol)
+                    .font(.system(size: size * 0.5, weight: .semibold))
+                    .foregroundStyle(.white))
+            .frame(width: size, height: size)
+            .shadow(color: .black.opacity(0.25), radius: 1.5, y: 1)
+    }
+}
+
+/// A navigation row: icon, title, trailing value and a chevron, highlighted on hover.
+private struct NavigationRow<Trailing: View>: View {
+    let symbol: String
+    let colors: [Color]
+    let title: String
+    let action: () -> Void
+    @ViewBuilder let trailing: Trailing
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                IconTile(symbol: symbol, colors: colors)
+                Text(title)
+                    .font(.system(size: 13))
+                Spacer(minLength: 8)
+                trailing
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(hovering ? Color.white.opacity(0.7) : Theme.tertiary)
+                    .offset(x: hovering ? 1.5 : 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 42)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(hovering ? 0.06 : 0)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(scale: 0.99))
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+    }
+}
+
+private struct RowSeparator: View {
+    var body: some View {
+        Rectangle().fill(Theme.separator).frame(height: 1).padding(.leading, 44).padding(.trailing, 10)
+    }
+}
+
+private func percent(_ value: CGFloat) -> String { "\(Int((value * 100).rounded()))%" }
+
+private func pointSize(_ sizing: NotchSizing, on edge: NotchEdge) -> String {
+    let size = sizing.collapsed(horizontal: edge.isHorizontal)
+    return "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) pt"
+}
+
+private struct Wallpaper: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.12, green: 0.13, blue: 0.34),
+                                    Color(red: 0.34, green: 0.17, blue: 0.48),
+                                    Color(red: 0.76, green: 0.36, blue: 0.44)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            RadialGradient(colors: [Color(red: 0.45, green: 0.55, blue: 1).opacity(0.45), .clear],
+                           center: UnitPoint(x: 0.2, y: 0.85), startRadius: 0, endRadius: 320)
+            RadialGradient(colors: [Color(red: 1, green: 0.6, blue: 0.4).opacity(0.35), .clear],
+                           center: UnitPoint(x: 0.9, y: 0.2), startRadius: 0, endRadius: 280)
+        }
+    }
+}
+
+/// The collapsed notch drawn at `zoom`, for previews. Its frame includes the ear padding;
+/// place it with `docked(to:zoom:)` so the body meets the container's edge.
+private struct NotchMiniature: View {
+    let edge: NotchEdge
+    let sizing: NotchSizing
+    @ObservedObject var stats: SystemStats
+    let zoom: CGFloat
+    var outlineActive = false
+
+    var body: some View {
+        let pad = NotchMetrics.earPad * zoom
+        let k = sizing.scale * zoom
+        let layout = sizing.collapsedLayout(horizontal: edge.isHorizontal)
+        let size = CGSize(width: layout.width * k, height: layout.height * k)
+        let shape = NotchShape(edge: edge, ear: 9 * k, radius: 14 * k, pad: pad)
+
+        ZStack {
+            shape.fill(Color.black)
+                .shadow(color: .black.opacity(outlineActive ? 0.55 : 0.3), radius: outlineActive ? 18 : 10)
+            Group {
+                if edge.isHorizontal {
+                    HorizontalCollapsed(stats: stats)
+                } else {
+                    VerticalCollapsed(stats: stats, size: layout, edge: edge)
+                }
+            }
+            .frame(width: layout.width, height: layout.height)
+            .scaleEffect(k)
+            .frame(width: size.width, height: size.height)
+            .padding(pad)
+            .mask(shape)
+            ResizeOutline(shape: NotchShape(edge: edge, ear: 9 * k, radius: 14 * k, pad: pad, isClosed: false),
+                          isActive: outlineActive)
+        }
+        .frame(width: size.width + pad * 2, height: size.height + pad * 2)
+        .environment(\.colorScheme, .dark)
+    }
+}
+
+private extension View {
+    /// Pins a notch-sized view to `edge` of its container, overhanging by the ear padding so
+    /// the body itself touches the edge.
+    func docked(to edge: NotchEdge, zoom: CGFloat) -> some View {
+        let pad = -NotchMetrics.earPad * zoom
+        let edges: Edge.Set = switch edge {
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .leading
+        case .right: .trailing
+        }
+        return frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge.alignment)
+            .padding(edges, pad)
+    }
+}
+
+// MARK: - Home
+
+private struct HomePage: View {
+    @ObservedObject var settings: NotchSettings
+    @ObservedObject var stats: SystemStats
+    let openAppearance: (NotchEdge?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HeroCard(settings: settings, stats: stats) { openAppearance(nil) }
+
+            VStack(alignment: .leading, spacing: 7) {
+                GroupHeader(title: "Appearance")
+                VStack(spacing: 0) {
+                    NavigationRow(symbol: "rectangle.topthird.inset.filled", colors: Theme.violet,
+                                  title: "Appearance & Size", action: { openAppearance(nil) }) {
+                        Text(percent(settings.sizing(for: settings.dockedEdge).scale))
+                            .monospacedDigit()
+                    }
+                }
+                .padding(4)
+                .glassGroup()
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                GroupHeader(title: "Edge Presets")
+                VStack(spacing: 0) {
+                    ForEach(Array(NotchEdge.allCases.enumerated()), id: \.element) { index, edge in
+                        if index > 0 { RowSeparator() }
+                        NavigationRow(symbol: edge.symbol, colors: Theme.graphite, title: edge.title,
+                                      action: { openAppearance(edge) }) {
+                            HStack(spacing: 8) {
+                                if edge == settings.dockedEdge { DockedBadge() }
+                                Text(pointSize(settings.sizing(for: edge), on: edge))
+                                    .monospacedDigit()
+                                    .contentTransition(.numericText())
+                            }
+                        }
+                    }
+                }
+                .padding(4)
+                .glassGroup()
+                Text("Each edge remembers its own size. Move the notch and it switches automatically.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tertiary)
+                    .padding(.horizontal, 6)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+    }
+}
+
+private struct DockedBadge: View {
+    var body: some View {
+        Text("Docked")
+            .font(.system(size: 9.5, weight: .bold))
+            .foregroundStyle(Color.green)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.green.opacity(0.16)))
+    }
+}
+
+/// Like the account card at the top of System Settings: a live miniature of the notch on the
+/// edge it's docked to, with a summary underneath.
+private struct HeroCard: View {
+    @ObservedObject var settings: NotchSettings
+    @ObservedObject var stats: SystemStats
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let edge = settings.dockedEdge
+        let sizing = settings.sizing(for: edge)
+        let collapsed = sizing.collapsed(horizontal: edge.isHorizontal)
+        // Fit the miniature in the 118 pt strip whatever its size.
+        let zoom = min(0.8, (edge.isHorizontal ? 400 : 100) / (edge.isHorizontal ? collapsed.width : collapsed.height))
+
+        Button(action: action) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Wallpaper()
+                    NotchMiniature(edge: edge, sizing: sizing, stats: stats, zoom: zoom)
+                        .docked(to: edge, zoom: zoom)
+                        .id(edge)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+                .frame(height: 118)
+                .clipped()
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("CustomNotch")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Docked to the \(edge.rawValue) edge · \(pointSize(sizing, on: edge))")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.secondary)
+                            .contentTransition(.numericText())
+                    }
+                    Spacer()
+                    Text("Customize")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(.white.opacity(hovering ? 0.18 : 0.1)))
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 56)
+                .background(.white.opacity(0.04))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.12)))
+            .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+            .animation(Theme.control, value: edge)
+            .animation(Theme.control, value: sizing)
+        }
+        .buttonStyle(PressStyle(scale: 0.99))
+        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
+    }
+}
+
+// MARK: - Appearance & Size
+
+private struct AppearancePage: View {
+    @ObservedObject var settings: NotchSettings
+    @ObservedObject var stats: SystemStats
+    @Binding var edge: NotchEdge
+
+    var body: some View {
+        let sizing = settings.sizing(for: edge)
+
+        VStack(spacing: 14) {
+            VStack(spacing: 8) {
+                EdgePicker(selection: $edge, docked: settings.dockedEdge)
+                Group {
+                    if edge == settings.dockedEdge {
+                        Label("Docked here — changes apply to the notch as you make them", systemImage: "dot.radiowaves.left.and.right")
+                    } else {
+                        Label("Saved for when the notch is docked to the \(edge.rawValue) edge", systemImage: "tray.and.arrow.down")
+                    }
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.secondary)
+                .id(edge == settings.dockedEdge)
+                .transition(.opacity)
+            }
+
+            ResizablePreview(settings: settings, stats: stats, edge: edge)
+                .frame(height: 330)
+
+            HStack(spacing: 0) {
+                SizeSlider(title: "Width", symbol: "arrow.left.and.right", value: binding(\.width),
+                           range: NotchSizing.widthRange)
+                ColumnDivider()
+                SizeSlider(title: "Height", symbol: "arrow.up.and.down", value: binding(\.height),
+                           range: NotchSizing.heightRange)
+                ColumnDivider()
+                SizeSlider(title: "Overall Size", symbol: "arrow.up.left.and.arrow.down.right", value: binding(\.scale),
+                           range: NotchSizing.scaleRange)
+            }
+            .padding(.vertical, 15)
+            .glassGroup(cornerRadius: 14)
+
+            HStack {
+                Label("\(pointSize(sizing, on: edge)) on the \(edge.rawValue) edge", systemImage: "ruler")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.secondary)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Spacer()
+                ResetButton(title: "Reset \(edge.title) Edge", isEnabled: sizing != .standard) {
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { settings.reset(edge) }
+                }
+            }
+        }
+        .padding(.horizontal, 26)
+        .padding(.top, 14)
+        .padding(.bottom, 18)
+        .animation(Theme.control, value: edge)
+    }
+
+    private func binding(_ key: WritableKeyPath<NotchSizing, CGFloat>) -> Binding<CGFloat> {
+        Binding(
+            get: { settings.sizing(for: edge)[keyPath: key] },
+            set: { value in
+                var sizing = settings.sizing(for: edge)
+                sizing[keyPath: key] = value
+                settings.setSizing(sizing, for: edge)
+            })
+    }
+}
+
+/// A glass segmented control with a sliding selection, marking the edge the notch is on.
+private struct EdgePicker: View {
+    @Binding var selection: NotchEdge
+    let docked: NotchEdge
+    @Namespace private var namespace
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(NotchEdge.allCases, id: \.self) { edge in
+                let selected = edge == selection
+                Button {
+                    withAnimation(Theme.control) { selection = edge }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: edge.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(edge.title)
+                            .font(.system(size: 12.5, weight: .medium))
+                        if edge == docked {
+                            Circle().fill(Color.green).frame(width: 5, height: 5)
+                        }
+                    }
+                    .foregroundStyle(.white.opacity(selected ? 1 : 0.6))
+                    .frame(width: 112, height: 28)
+                    .background {
+                        if selected {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(.white.opacity(0.16))
+                                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.white.opacity(0.12)))
+                                .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                                .matchedGeometryEffect(id: "edge", in: namespace)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .glassGroup(cornerRadius: 11)
+    }
+}
+
+private struct ColumnDivider: View {
+    var body: some View {
+        Rectangle().fill(Theme.separator).frame(width: 1, height: 50)
     }
 }
 
 private struct ResetButton: View {
+    let title: String
     let isEnabled: Bool
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Label("Reset to Default", systemImage: "arrow.counterclockwise")
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(.white.opacity(hovering && isEnabled ? 0.15 : 0.08)))
-                .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
+            Label(title, systemImage: "arrow.counterclockwise")
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.white.opacity(hovering && isEnabled ? 0.16 : 0.09)))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.white.opacity(0.1)))
         }
         .buttonStyle(PressStyle(scale: 0.95))
         .disabled(!isEnabled)
@@ -445,7 +659,7 @@ private struct SizeSlider: View {
                     .animation(.snappy, value: value)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(.white.opacity(0.08)))
+                    .background(Capsule().fill(.white.opacity(0.09)))
             }
             Slider(value: $value, in: range)
                 .controlSize(.small)
@@ -457,91 +671,70 @@ private struct SizeSlider: View {
 
 // MARK: - Resizable preview
 
-/// A zoomed-in desktop with the notch docked to its top edge. Its left, right and bottom
-/// edges (and bottom corners) can be dragged like a window's to set width and height, and a
-/// trackpad pinch sets the overall size. Everything writes straight to `settings`, so the
-/// sliders and the real notch follow along.
+/// A desktop with the notch docked to `edge`. The notch's free edges and outer corners can be
+/// dragged like a window's to set width and height; a trackpad pinch sets the overall size.
+/// Everything writes straight to `settings`, so the sliders, and the real notch when it's
+/// docked on this edge, follow along.
 private struct ResizablePreview: View {
     @ObservedObject var settings: NotchSettings
     @ObservedObject var stats: SystemStats
+    let edge: NotchEdge
 
     @State private var activeHandle: Handle?
     @State private var dragStart: NotchSizing?
     @State private var pinchStart: CGFloat?
     @State private var hovering = false
 
-    private let zoom: CGFloat = 1.5
+    /// Fixed per orientation so a drag maps to the same change throughout.
+    private var zoom: CGFloat { edge.isHorizontal ? 1.5 : 0.92 }
 
     enum Handle: CaseIterable {
-        case left, right, bottom, bottomLeft, bottomRight
+        case start, end, depth, startCorner, endCorner
 
-        var widthSign: CGFloat {
+        var alongSign: CGFloat {
             switch self {
-            case .left, .bottomLeft: -1
-            case .right, .bottomRight: 1
-            case .bottom: 0
+            case .start, .startCorner: -1
+            case .end, .endCorner: 1
+            case .depth: 0
             }
         }
 
-        var resizesHeight: Bool { self == .bottom || self == .bottomLeft || self == .bottomRight }
-
-        var cursor: NSCursor {
-            if #available(macOS 15.0, *) {
-                let position: NSCursor.FrameResizePosition = switch self {
-                case .left: .left
-                case .right: .right
-                case .bottom: .bottom
-                case .bottomLeft: .bottomLeft
-                case .bottomRight: .bottomRight
-                }
-                return NSCursor.frameResize(position: position, directions: .all)
-            }
-            return self == .bottom ? .resizeUpDown : (resizesHeight ? .crosshair : .resizeLeftRight)
-        }
+        var resizesDepth: Bool { self == .depth || self == .startCorner || self == .endCorner }
     }
 
     var body: some View {
-        let sizing = settings.sizing
-        let pad = NotchMetrics.earPad * zoom
+        let sizing = settings.sizing(for: edge)
         let k = sizing.scale * zoom
-        let layout = sizing.collapsedLayout(horizontal: true)
+        let layout = sizing.collapsedLayout(horizontal: edge.isHorizontal)
         let body = CGSize(width: layout.width * k, height: layout.height * k)
-        let isResizing = activeHandle != nil
-        let fill = NotchShape(edge: .top, ear: 9 * k, radius: 14 * k, pad: pad)
-        let outline = NotchShape(edge: .top, ear: 9 * k, radius: 14 * k, pad: pad, isClosed: false)
+        let pad = NotchMetrics.earPad * zoom
 
-        ZStack(alignment: .top) {
+        ZStack {
             Wallpaper()
 
             ZStack {
-                fill.fill(Color.black)
-                    .shadow(color: .black.opacity(isResizing ? 0.5 : 0.3), radius: isResizing ? 18 : 10, y: 6)
-                HorizontalCollapsed(stats: stats)
-                    .frame(width: layout.width, height: layout.height)
-                    .scaleEffect(k)
-                    .frame(width: body.width, height: body.height)
+                NotchMiniature(edge: edge, sizing: sizing, stats: stats, zoom: zoom, outlineActive: activeHandle != nil)
+                handles(body: body)
                     .padding(pad)
-                    .mask(fill)
-                ResizeOutline(shape: outline, isActive: isResizing)
             }
-            .frame(width: body.width + pad * 2, height: body.height + pad * 2)
-            .padding(.top, -pad)
-            .environment(\.colorScheme, .dark)
+            .docked(to: edge, zoom: zoom)
+            .id(edge)
+            .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: edge.unitPoint)))
 
-            handles(for: body)
-
-            footer(isResizing: isResizing)
+            footer(sizing: sizing)
         }
         .coordinateSpace(name: "preview")
-        .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.1)))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.12)))
+        .shadow(color: .black.opacity(0.3), radius: 14, y: 6)
         .onHover { h in withAnimation(.easeOut(duration: 0.2)) { hovering = h } }
         .simultaneousGesture(
             MagnifyGesture()
                 .onChanged { value in
-                    if pinchStart == nil { pinchStart = settings.sizing.scale; begin(.bottomRight) }
-                    settings.sizing.scale = clamp(pinchStart! * value.magnification, NotchSizing.scaleRange)
+                    if pinchStart == nil { pinchStart = sizing.scale; begin(.endCorner) }
+                    var next = settings.sizing(for: edge)
+                    next.scale = (pinchStart ?? 1) * value.magnification
+                    settings.setSizing(next, for: edge)
                 }
                 .onEnded { _ in
                     pinchStart = nil
@@ -549,43 +742,97 @@ private struct ResizablePreview: View {
                 })
         #if DEBUG
         .onReceive(DistributedNotificationCenter.default().publisher(for: .init("CustomNotch.debugOutline"))) { _ in
-            if activeHandle == nil { begin(.right) } else { end() }
+            if activeHandle == nil { begin(.end) } else { end() }
         }
         #endif
     }
 
-    private func handles(for body: CGSize) -> some View {
-        let grip = Color.white.opacity(hovering || activeHandle != nil ? 0.55 : 0)
-        let side = max(body.height - 12, 10)
-        return Color.clear
-            .frame(width: body.width, height: body.height)
-            .overlay(alignment: .leading) {
-                handle(.left) { Capsule().fill(grip).frame(width: 4, height: min(26, side * 0.6)).offset(x: -6) }
-                    .frame(width: 22, height: side).offset(x: -11)
-            }
-            .overlay(alignment: .trailing) {
-                handle(.right) { Capsule().fill(grip).frame(width: 4, height: min(26, side * 0.6)).offset(x: 6) }
-                    .frame(width: 22, height: side).offset(x: 11)
-            }
-            .overlay(alignment: .bottom) {
-                handle(.bottom) { Capsule().fill(grip).frame(width: min(34, body.width * 0.3), height: 4).offset(y: 6) }
-                    .frame(width: max(body.width - 24, 10), height: 22).offset(y: 11)
-            }
-            .overlay(alignment: .bottomLeading) {
-                handle(.bottomLeft) { Color.clear }.frame(width: 24, height: 24).offset(x: -12, y: 12)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                handle(.bottomRight) { Color.clear }.frame(width: 24, height: 24).offset(x: 12, y: 12)
-            }
+    // MARK: Handles
+
+    private var depthAlignment: Alignment {
+        switch edge {
+        case .top: .bottom
+        case .bottom: .top
+        case .left: .trailing
+        case .right: .leading
+        }
     }
 
-    private func handle(_ handle: Handle, @ViewBuilder grip: () -> some View) -> some View {
+    private func alignment(for handle: Handle) -> Alignment {
+        let h = edge.isHorizontal
+        let start: Alignment = h ? .leading : .top
+        let end: Alignment = h ? .trailing : .bottom
+        switch handle {
+        case .start: return start
+        case .end: return end
+        case .depth: return depthAlignment
+        case .startCorner, .endCorner:
+            let along = handle == .startCorner ? start : end
+            return Alignment(horizontal: h ? along.horizontal : depthAlignment.horizontal,
+                             vertical: h ? depthAlignment.vertical : along.vertical)
+        }
+    }
+
+    /// Unit vector pointing outwards from the notch at `handle`.
+    private func outward(_ handle: Handle) -> CGSize {
+        let along: CGSize = edge.isHorizontal ? CGSize(width: handle.alongSign, height: 0)
+                                              : CGSize(width: 0, height: handle.alongSign)
+        guard handle.resizesDepth else { return along }
+        let depth: CGSize = switch edge {
+        case .top: CGSize(width: 0, height: 1)
+        case .bottom: CGSize(width: 0, height: -1)
+        case .left: CGSize(width: 1, height: 0)
+        case .right: CGSize(width: -1, height: 0)
+        }
+        return CGSize(width: along.width + depth.width, height: along.height + depth.height)
+    }
+
+    private func handles(body: CGSize) -> some View {
+        let showGrip = hovering || activeHandle != nil
+        let h = edge.isHorizontal
+        let alongLength = h ? body.width : body.height
+        let depthLength = h ? body.height : body.width
+
+        return ZStack {
+            ForEach(Handle.allCases, id: \.self) { handle in
+                let dir = outward(handle)
+                let size: CGSize = switch handle {
+                case .start, .end:
+                    h ? CGSize(width: 22, height: max(depthLength - 12, 10)) : CGSize(width: max(depthLength - 12, 10), height: 22)
+                case .depth:
+                    h ? CGSize(width: max(alongLength - 24, 10), height: 22) : CGSize(width: 22, height: max(alongLength - 24, 10))
+                case .startCorner, .endCorner:
+                    CGSize(width: 24, height: 24)
+                }
+                let grip: CGSize = switch handle {
+                case .start, .end:
+                    h ? CGSize(width: 4, height: min(26, depthLength * 0.6)) : CGSize(width: min(26, depthLength * 0.6), height: 4)
+                case .depth:
+                    h ? CGSize(width: min(34, alongLength * 0.3), height: 4) : CGSize(width: 4, height: min(34, alongLength * 0.3))
+                case .startCorner, .endCorner:
+                    .zero
+                }
+                handleView(handle) {
+                    Capsule()
+                        .fill(.white.opacity(showGrip ? 0.6 : 0))
+                        .frame(width: grip.width, height: grip.height)
+                        .offset(x: dir.width * 6, y: dir.height * 6)
+                }
+                .frame(width: size.width, height: size.height)
+                .offset(x: dir.width * 11, y: dir.height * 11)
+                .frame(width: body.width, height: body.height, alignment: alignment(for: handle))
+            }
+        }
+        .frame(width: body.width, height: body.height)
+    }
+
+    private func handleView(_ handle: Handle, @ViewBuilder grip: () -> some View) -> some View {
         ZStack { grip() }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
-                case .active: handle.cursor.set()
+                case .active: cursor(for: handle).set()
                 case .ended: if activeHandle == nil { NSCursor.arrow.set() }
                 }
             }
@@ -595,16 +842,38 @@ private struct ResizablePreview: View {
                     .onEnded { _ in end() })
     }
 
-    private func footer(isResizing: Bool) -> some View {
-        let size = settings.sizing.collapsed(horizontal: true)
+    private func cursor(for handle: Handle) -> NSCursor {
+        let a = alignment(for: handle)
+        if #available(macOS 15.0, *) {
+            let position: NSCursor.FrameResizePosition = switch (a.horizontal, a.vertical) {
+            case (.leading, .top): .topLeft
+            case (.trailing, .top): .topRight
+            case (.leading, .bottom): .bottomLeft
+            case (.trailing, .bottom): .bottomRight
+            case (.leading, _): .left
+            case (.trailing, _): .right
+            case (_, .top): .top
+            default: .bottom
+            }
+            return NSCursor.frameResize(position: position, directions: .all)
+        }
+        if handle == .start || handle == .end { return edge.isHorizontal ? .resizeLeftRight : .resizeUpDown }
+        if handle == .depth { return edge.isHorizontal ? .resizeUpDown : .resizeLeftRight }
+        return .crosshair
+    }
+
+    // MARK: Dragging
+
+    private func footer(sizing: NotchSizing) -> some View {
+        let isResizing = activeHandle != nil
         return Group {
             if isResizing {
-                Text("\(Int(size.width.rounded())) × \(Int(size.height.rounded())) pt")
+                Text(pointSize(sizing, on: edge))
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else {
-                Label("Drag the edges to resize", systemImage: "hand.draw")
+                Label("Drag the edges to resize · Pinch to scale", systemImage: "hand.draw")
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
         }
@@ -614,58 +883,49 @@ private struct ResizablePreview: View {
         .padding(.vertical, 6)
         .background(Capsule().fill(.black.opacity(0.35)))
         .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
-        .frame(maxHeight: .infinity, alignment: .bottom)
-        .padding(.bottom, 16)
+        // Keep the label off the notch: opposite side for top/bottom, bottom for the sides.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge == .bottom ? .top : .bottom)
+        .padding(edge == .bottom ? .top : .bottom, 16)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isResizing)
     }
 
     private func begin(_ handle: Handle) {
         guard dragStart == nil else { return }
-        dragStart = settings.sizing
+        dragStart = settings.sizing(for: edge)
         withAnimation(.easeOut(duration: 0.2)) { activeHandle = handle }
     }
 
     private func drag(_ handle: Handle, by translation: CGSize) {
         begin(handle)
         guard let start = dragStart else { return }
-        handle.cursor.set()
-        let base = NotchMetrics.collapsed(horizontal: true)
+        cursor(for: handle).set()
+        let base = NotchMetrics.collapsed(horizontal: edge.isHorizontal)
+        let baseAlong = edge.isHorizontal ? base.width : base.height
+        let baseDepth = edge.isHorizontal ? base.height : base.width
         let k = start.scale * zoom
-        var next = settings.sizing
-        if handle.widthSign != 0 {
-            // The notch grows from its centre, so each edge moves by half the width change.
-            next.width = clamp(start.width + 2 * handle.widthSign * translation.width / (base.width * k),
-                               NotchSizing.widthRange)
+        let along = edge.isHorizontal ? translation.width : translation.height
+        let depth: CGFloat = switch edge {
+        case .top: translation.height
+        case .bottom: -translation.height
+        case .left: translation.width
+        case .right: -translation.width
         }
-        if handle.resizesHeight {
-            next.height = clamp(start.height + translation.height / (base.height * k), NotchSizing.heightRange)
+
+        var next = settings.sizing(for: edge)
+        if handle.alongSign != 0 {
+            // The notch grows from its centre, so each end moves by half the width change.
+            next.width = start.width + 2 * handle.alongSign * along / (baseAlong * k)
         }
-        settings.sizing = next
+        if handle.resizesDepth {
+            next.height = start.height + depth / (baseDepth * k)
+        }
+        settings.setSizing(next, for: edge)
     }
 
     private func end() {
         dragStart = nil
         withAnimation(.easeOut(duration: 0.35)) { activeHandle = nil }
         NSCursor.arrow.set()
-    }
-
-    private func clamp(_ value: CGFloat, _ range: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(value, range.lowerBound), range.upperBound)
-    }
-}
-
-private struct Wallpaper: View {
-    var body: some View {
-        ZStack {
-            LinearGradient(colors: [Color(red: 0.13, green: 0.14, blue: 0.36),
-                                    Color(red: 0.36, green: 0.18, blue: 0.5),
-                                    Color(red: 0.78, green: 0.37, blue: 0.45)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-            RadialGradient(colors: [Color(red: 0.45, green: 0.55, blue: 1).opacity(0.45), .clear],
-                           center: UnitPoint(x: 0.2, y: 0.85), startRadius: 0, endRadius: 320)
-            RadialGradient(colors: [Color(red: 1, green: 0.6, blue: 0.4).opacity(0.35), .clear],
-                           center: UnitPoint(x: 0.9, y: 0.2), startRadius: 0, endRadius: 280)
-        }
     }
 }
 
@@ -684,7 +944,6 @@ private struct ResizeOutline: View {
             }
         }
         .opacity(isActive ? 1 : 0)
-        .scaleEffect(isActive ? 1 : 0.985, anchor: .top)
         .allowsHitTesting(false)
     }
 }
