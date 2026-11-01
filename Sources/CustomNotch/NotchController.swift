@@ -46,6 +46,15 @@ final class NotchController: NSObject {
     let model = NotchModel()
     let stats = SystemStats()
     let settings = NotchSettings()
+    /// The Terraria Companion who lives in the notch (if any), and her life here.
+    let link = CompanionLink()
+    private(set) lazy var home = CompanionHome(link: link)
+    private var companionObservers: [AnyCancellable] = []
+    private var hasResident = false
+    private var showsRoom = false
+    /// Pulling her out: pressed on her in the room, and her held sprite once it's a drag.
+    private var carryDown: CGPoint?
+    private var carry: CompanionCarry?
     private lazy var settingsWindow = SettingsWindowController(settings: settings, stats: stats)
     private lazy var detailPanel = ResourceDetailController(stats: stats)
     /// Per-edge sizes, mirrored from `settings` (its publisher fires before the value lands).
@@ -100,12 +109,13 @@ final class NotchController: NSObject {
 
     func show() {
         panel = NotchPanel(size: canvas)
-        let root = NotchRootView(model: model, stats: stats)
+        let root = NotchRootView(model: model, stats: stats, home: home, link: link)
         let host = NotchHostingView(rootView: root)
         host.frame = NSRect(x: 0, y: 0, width: canvas, height: canvas)
         panel.contentView = host
         model.openSettings = { [weak self] in self?.openSettings() }
         model.openDetail = { [weak self] kind in self?.openDetail(kind) }
+        model.openInventory = { [weak self] in self?.openInventory() }
 
         sizes = settings.sizes
         sizingObserver = settings.$sizes.removeDuplicates().dropFirst().sink { [weak self] new in
@@ -116,6 +126,19 @@ final class NotchController: NSObject {
         moveWindow(to: attachPoint)
         applyLayout(nil)
         panel.orderFrontRegardless()
+
+        link.start()
+        companionObservers = [
+            link.$resident.map { $0 != nil }.removeDuplicates().sink { [weak self] _ in
+                DispatchQueue.main.async { self?.companionChanged() }
+            },
+            link.$messages.map { $0.contains { !$0.read } }.removeDuplicates().sink { [weak self] _ in
+                DispatchQueue.main.async { self?.companionChanged() }
+            },
+            link.$connected.removeDuplicates().sink { [weak self] _ in
+                DispatchQueue.main.async { self?.publishGeometry() }
+            },
+        ]
 
         DispatchQueue.main.async {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) { self.model.isAppeared = true }
@@ -176,6 +199,34 @@ final class NotchController: NSObject {
         detailPanel.show(kind, beside: rect, edge: edge, on: screen)
     }
 
+    /// Her Terraria inventory, from the companion app, with her staying at home.
+    func openInventory() {
+        Task { await link.send("inventory") }
+    }
+
+    /// Someone moved in or out, or her unread messages changed: make room (or give it back).
+    private func companionChanged() {
+        let resident = link.resident != nil
+        let room = resident || !link.unread.isEmpty
+        guard resident != hasResident || room != showsRoom else { return }
+        hasResident = resident
+        showsRoom = room
+        model.hasResident = resident
+        model.showsRoom = room
+        guard !isDragging else { return }
+        let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -1, dy: -1).contains(attachPoint) })
+            ?? NSScreen.screens.first
+        if let screen {
+            let previous = attachPoint
+            attach(edge: edge, screen: screen, along: edge.isHorizontal ? attachPoint.x : attachPoint.y)
+            if attachPoint != previous {
+                springVelocity = .zero
+                startSpring()
+            }
+        }
+        applyLayout(Anim.open)
+    }
+
     private func sizesChanged(to new: [NotchEdge: NotchSizing]) {
         let old = sizing
         sizes = new
@@ -209,6 +260,17 @@ final class NotchController: NSObject {
     private func moveWindow(to point: CGPoint) {
         windowAnchor = point
         panel.setFrameOrigin(CGPoint(x: (point.x - canvas / 2).rounded(), y: (point.y - canvas / 2).rounded()))
+        publishGeometry()
+    }
+
+    /// Tell the companion app where the notch body is (global points, top-left origin), so it can
+    /// catch a companion dropped or thrown onto it.
+    private func publishGeometry() {
+        guard link.connected else { return }
+        let rect = bodyRect.offsetBy(dx: windowAnchor.x, dy: windowAnchor.y)
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? rect.maxY
+        let topLeft = CGRect(x: rect.minX, y: primaryHeight - rect.maxY, width: rect.width, height: rect.height)
+        link.postGeometry(topLeft, edge: edge, expanded: model.isExpanded, dragging: isDragging)
     }
 
     /// Range of the attached edge the notch body may occupy on `screen`.
@@ -269,7 +331,7 @@ final class NotchController: NSObject {
         edge = newEdge
         if settings.dockedEdge != newEdge { settings.dockedEdge = newEdge }
         alongRange = allowedRange(edge: newEdge, screen: screen, near: along)
-        let collapsed = sizing.collapsed(horizontal: newEdge.isHorizontal)
+        let collapsed = sizing.collapsed(horizontal: newEdge.isHorizontal, lane: hasResident)
         let span = newEdge.isHorizontal ? collapsed.width : collapsed.height
         let a = clamp(along, centeredSpan: span, in: alongRange)
         switch newEdge {
@@ -290,12 +352,13 @@ final class NotchController: NSObject {
         let radius: CGFloat
 
         if isDragging {
-            size = sizing.collapsed(horizontal: horizontal)
+            size = sizing.collapsed(horizontal: horizontal, lane: hasResident)
             rect = CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height)
             radius = min(size.width, size.height) / 2
             ear = -radius
         } else {
-            size = isExpanded ? sizing.expanded(horizontal: horizontal) : sizing.collapsed(horizontal: horizontal)
+            size = isExpanded ? sizing.expanded(horizontal: horizontal, room: showsRoom)
+                : sizing.collapsed(horizontal: horizontal, lane: hasResident)
             let along = horizontal ? attachPoint.x : attachPoint.y
             let span = horizontal ? size.width : size.height
             let shift = clamp(along, centeredSpan: span, in: alongRange) - along
@@ -312,6 +375,11 @@ final class NotchController: NSObject {
         bodyRect = rect
         // Poll system stats only while the notch is open (the detail panel keeps it open).
         stats.setLive(isExpanded)
+        // Opening the notch is reading what she said: the glow goes, her bubble shows.
+        if isExpanded != link.isOpen {
+            link.isOpen = isExpanded
+            if isExpanded { home.opened() }
+        }
 
         let center = CGPoint(x: canvas / 2 + rect.midX, y: canvas / 2 - rect.midY)
         let update = {
@@ -331,6 +399,7 @@ final class NotchController: NSObject {
             t.disablesAnimations = true
             withTransaction(t, update)
         }
+        publishGeometry()
     }
 
     // MARK: Mouse
@@ -341,8 +410,19 @@ final class NotchController: NSObject {
         switch event.type {
         case .leftMouseDown:
             mouseDownPoint = p
+            // A press on her in the opened room picks her up (or pats her) instead of the notch.
+            let local = CGPoint(x: event.locationInWindow.x, y: canvas - event.locationInWindow.y)
+            carryDown = model.isExpanded && home.spriteContains(windowPoint: local) ? p : nil
             return event
         case .leftMouseDragged:
+            if let down = carryDown {
+                if carry == nil {
+                    guard hypot(p.x - down.x, p.y - down.y) > 4 else { return nil }
+                    beginCarry(at: p)
+                }
+                updateCarry(at: p)
+                return nil
+            }
             guard let down = mouseDownPoint else { return event }
             if !isDragging {
                 guard hypot(p.x - down.x, p.y - down.y) > 4 else { return event }
@@ -352,6 +432,11 @@ final class NotchController: NSObject {
             return nil
         case .leftMouseUp:
             mouseDownPoint = nil
+            if carryDown != nil {
+                carryDown = nil
+                if carry != nil { endCarry(at: p) } else { pet() }
+                return nil
+            }
             if isDragging {
                 endDrag(at: p)
                 return nil
@@ -424,6 +509,72 @@ final class NotchController: NSObject {
         suppressHoverUntilExit = true
         wakeHover()
         savePosition(screen: screen)
+    }
+
+    // MARK: Companion
+
+    private func pet() {
+        home.petted()
+        Task { await link.send("pet") }
+    }
+
+    private func beginCarry(at p: CGPoint) {
+        guard let atlas = link.atlas else { carryDown = nil; return }
+        detailPanel.close()
+        home.sim.carried = true
+        let roomScale = atlas.scale(forBodyHeight: edge.isHorizontal ? 40 : 44) * sizing.scale
+        let c = CompanionCarry(atlas: atlas, roomScale: roomScale)
+        carry = c
+        samples = [(CACurrentMediaTime(), p)]
+        panel.ignoresMouseEvents = false
+        c.show(at: p)
+        NSCursor.closedHand.push()
+    }
+
+    private func updateCarry(at p: CGPoint) {
+        let now = CACurrentMediaTime()
+        samples.append((now, p))
+        samples.removeAll { now - $0.time > 0.1 }
+        let v: CGVector
+        if let first = samples.first, let last = samples.last, last.time - first.time > 0.008 {
+            let dt = last.time - first.time
+            v = CGVector(dx: (last.point.x - first.point.x) / dt, dy: (last.point.y - first.point.y) / dt)
+        } else {
+            v = .zero
+        }
+        carry?.move(to: p, velocity: v)
+    }
+
+    /// Let go: outside the notch she goes back to the desktop right there, keeping the throw;
+    /// over the notch (or with no companion app to take her) she drops back into her room.
+    private func endCarry(at p: CGPoint) {
+        NSCursor.pop()
+        guard let c = carry else { return }
+        carry = nil
+        let v = releaseVelocity(at: p)
+        let home = self.home
+        let back = CGPoint(x: bodyRect.midX + windowAnchor.x, y: bodyRect.midY + windowAnchor.y)
+        let stayIn = {
+            c.retreat(to: back) {
+                home.sim.carried = false
+                home.sim.play("happy")
+            }
+        }
+        suppressHoverUntilExit = false
+        wakeHover()
+        if hoverRect.insetBy(dx: -8, dy: -8).contains(p) {
+            stayIn()
+            return
+        }
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? p.y
+        let global = CGPoint(x: p.x, y: primaryHeight - p.y)
+        Task {
+            if await link.send("exit", at: global, velocity: CGVector(dx: v.dx, dy: -v.dy)) {
+                c.handOff()
+            } else {
+                stayIn()
+            }
+        }
     }
 
     private func releaseVelocity(at p: CGPoint) -> CGVector {
@@ -515,7 +666,7 @@ final class NotchController: NSObject {
     }
 
     private var needsHoverTimer: Bool {
-        model.isExpanded || isDragging || isSpringing || insideSince != nil || outsideSince != nil
+        model.isExpanded || isDragging || carry != nil || isSpringing || insideSince != nil || outsideSince != nil
             || suppressHoverUntilExit || hoverRect.insetBy(dx: -60, dy: -60).contains(NSEvent.mouseLocation)
     }
 
@@ -537,7 +688,7 @@ final class NotchController: NSObject {
     }
 
     private func pollHover() {
-        guard !isDragging, panel != nil else { return }
+        guard !isDragging, carry == nil, panel != nil else { return }
         let inside = hoverRect.contains(NSEvent.mouseLocation)
         if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
 
@@ -618,6 +769,48 @@ final class NotchController: NSObject {
         center.addObserver(self, selector: #selector(debugThrow(_:)), name: .init("CustomNotch.debugThrow"), object: nil)
         center.addObserver(self, selector: #selector(debugSize(_:)), name: .init("CustomNotch.debugSize"), object: nil)
         center.addObserver(self, selector: #selector(debugDetail(_:)), name: .init("CustomNotch.debugDetail"), object: nil)
+        center.addObserver(self, selector: #selector(debugCompanion(_:)), name: .init("CustomNotch.debugCompanion"), object: nil)
+    }
+
+    /// "CustomNotch.debugCompanion": "open" / "close" the notch, "pin", "pet" or "inventory" the
+    /// resident, or "carry x,y[,steps]" to pick her up in the room and drag her to that screen
+    /// point (global, y-up) through the real carry pipeline.
+    @objc private func debugCompanion(_ note: Notification) {
+        guard let s = note.object as? String else { return }
+        let parts = s.split(separator: " ", maxSplits: 1).map(String.init)
+        switch parts.first {
+        case "open": expand()
+        case "close": model.isPinned = false; collapse()
+        case "pin": model.isPinned.toggle()
+        case "pet": pet()
+        case "inventory": openInventory()
+        case "carry":
+            guard parts.count > 1, let rect = home.spriteRect else { return }
+            let v = parts[1].split(separator: ",").compactMap { Double($0) }
+            guard v.count >= 2 else { return }
+            let steps = v.count > 2 ? CGFloat(v[2]) : 24
+            // The sprite's centre, from window (top-left) to screen (y-up) points.
+            let origin = panel.frame.origin
+            let start = CGPoint(x: origin.x + rect.midX, y: origin.y + canvas - rect.midY)
+            let end = CGPoint(x: v[0], y: v[1])
+            carryDown = start
+            beginCarry(at: start)
+            var i = 0
+            Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { timer in
+                MainActor.assumeIsolated {
+                    i += 1
+                    let t = min(1, CGFloat(i) / steps)
+                    let p = CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
+                    self.updateCarry(at: p)
+                    if t >= 1 {
+                        timer.invalidate()
+                        self.carryDown = nil
+                        self.endCarry(at: p)
+                    }
+                }
+            }
+        default: break
+        }
     }
 
     /// "CustomNotch.debugDetail" with "cpu", "memory" or "battery" opens the notch and that panel.

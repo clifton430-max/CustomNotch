@@ -47,9 +47,22 @@ enum NotchMetrics {
         horizontal ? CGSize(width: 200, height: 34) : CGSize(width: 36, height: 168)
     }
 
-    static func expanded(horizontal: Bool) -> CGSize {
-        horizontal ? CGSize(width: 440, height: 150) : CGSize(width: 244, height: 420)
+    /// `room` adds the resident companion's home below the usual panel.
+    static func expanded(horizontal: Bool, room: Bool = false) -> CGSize {
+        let base = horizontal ? CGSize(width: 440, height: 150) : CGSize(width: 244, height: 420)
+        guard room else { return base }
+        return CGSize(width: base.width, height: base.height + (horizontal ? CompanionMetrics.roomHorizontal : CompanionMetrics.roomVertical))
     }
+}
+
+/// Room made for a companion living in the notch (layout points, before `scale`).
+enum CompanionMetrics {
+    /// Collapsed: her lane beside the clock (along a top/bottom edge) or below it (on a side edge).
+    static let laneAlong: CGFloat = 84
+    static let laneBelow: CGFloat = 58
+    /// Opened: her room under the panel.
+    static let roomHorizontal: CGFloat = 146
+    static let roomVertical: CGFloat = 196
 }
 
 /// User-adjustable notch dimensions, as multipliers of the defaults in `NotchMetrics`.
@@ -72,20 +85,25 @@ struct NotchSizing: Equatable, Codable {
     }
 
     /// Collapsed size before `scale`; collapsed content is laid out at this size, then scaled.
-    func collapsedLayout(horizontal: Bool) -> CGSize {
+    /// `lane` adds the strip a resident companion lives in.
+    func collapsedLayout(horizontal: Bool, lane: Bool = false) -> CGSize {
         let base = NotchMetrics.collapsed(horizontal: horizontal)
-        return horizontal
+        var s = horizontal
             ? CGSize(width: base.width * width, height: base.height * height)
             : CGSize(width: base.width * height, height: base.height * width)
+        if lane {
+            if horizontal { s.width += CompanionMetrics.laneAlong } else { s.height += CompanionMetrics.laneBelow }
+        }
+        return s
     }
 
-    func collapsed(horizontal: Bool) -> CGSize {
-        let s = collapsedLayout(horizontal: horizontal)
+    func collapsed(horizontal: Bool, lane: Bool = false) -> CGSize {
+        let s = collapsedLayout(horizontal: horizontal, lane: lane)
         return CGSize(width: s.width * scale, height: s.height * scale)
     }
 
-    func expanded(horizontal: Bool) -> CGSize {
-        let s = NotchMetrics.expanded(horizontal: horizontal)
+    func expanded(horizontal: Bool, room: Bool = false) -> CGSize {
+        let s = NotchMetrics.expanded(horizontal: horizontal, room: room)
         return CGSize(width: s.width * scale, height: s.height * scale)
     }
 }
@@ -153,7 +171,12 @@ final class NotchModel: ObservableObject {
     @Published var ear: CGFloat = 9
     @Published var radius: CGFloat = 14
     @Published var sizing = NotchSizing.standard
+    /// A companion lives here (her lane shows while collapsed).
+    @Published var hasResident = false
+    /// Her room shows when opened (she lives here, or left messages to read).
+    @Published var showsRoom = false
 
     var openSettings: () -> Void = {}
+    var openInventory: () -> Void = {}
     var openDetail: (ResourceKind) -> Void = { _ in }
 }

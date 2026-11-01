@@ -4,27 +4,70 @@ import SwiftUI
 struct NotchRootView: View {
     @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
+    @ObservedObject var home: CompanionHome
+    @ObservedObject var link: CompanionLink
+
+    /// 0 none · 1 she's talking (until opened) · 2 a companion is held over it · 3 one is coming in.
+    private var glowLevel: Int {
+        switch link.hover {
+        case "incoming": 3
+        case "empty": 2
+        default: link.glowing && !model.isExpanded ? 1 : 0
+        }
+    }
 
     var body: some View {
         let pad = NotchMetrics.earPad
         let shape = NotchShape(edge: model.edge, ear: model.ear, radius: model.radius)
+        let tint = CompanionPalette.glow(link.resident)
+        let edge = model.edge
 
         ZStack {
+            if glowLevel > 0 {
+                GlowAura(shape: shape, tint: tint, level: glowLevel)
+                    .transition(.opacity.animation(.easeOut(duration: 0.35)))
+            }
             shape
                 .fill(Color.black)
                 .shadow(color: .black.opacity(model.isFloating ? 0.55 : (model.isExpanded ? 0.4 : 0)),
                         radius: model.isFloating ? 24 : 18,
                         y: model.isFloating ? 12 : 6)
 
-            NotchContent(model: model, stats: stats)
+            NotchContent(model: model, stats: stats, home: home, link: link)
                 .frame(width: model.bodySize.width, height: model.bodySize.height, alignment: model.edge.alignment)
                 .padding(pad)
                 .mask(shape)
 
             shape
                 .stroke(Color.white.opacity(model.isFloating ? 0.16 : 0), lineWidth: 0.75)
+            if glowLevel > 0 {
+                shape.stroke(tint.opacity(glowLevel > 1 ? 0.95 : 0.8), lineWidth: glowLevel > 1 ? 2 : 1.4)
+                    .transition(.opacity.animation(.easeOut(duration: 0.3)))
+            }
+            Gulp(trigger: home.gulp, tint: tint)
         }
         .frame(width: model.bodySize.width + pad * 2, height: model.bodySize.height + pad * 2)
+        // Held over it, the notch opens up for her; taken, it shakes its head.
+        .scaleEffect(glowLevel >= 2 ? 1.06 : 1, anchor: model.edge.unitPoint)
+        .animation(.spring(response: 0.3, dampingFraction: 0.55), value: glowLevel)
+        .keyframeAnimator(initialValue: CGFloat(0), trigger: link.hover == "full") { content, x in
+            content.offset(x: edge.isHorizontal ? x : 0, y: edge.isHorizontal ? 0 : x)
+        } keyframes: { _ in
+            KeyframeTrack {
+                for v in [7.0, -6, 5, -4, 2, 0] { LinearKeyframe(CGFloat(v), duration: 0.06) }
+            }
+        }
+        // Gulp: she's swallowed down, the notch bulges and settles.
+        .keyframeAnimator(initialValue: CGFloat(1), trigger: home.gulp) { content, k in
+            content.scaleEffect(k, anchor: edge.unitPoint)
+        } keyframes: { _ in
+            KeyframeTrack {
+                SpringKeyframe(1.16, duration: 0.16, spring: .snappy)
+                SpringKeyframe(0.94, duration: 0.18, spring: .snappy)
+                SpringKeyframe(1.04, duration: 0.2, spring: .bouncy)
+                SpringKeyframe(1, duration: 0.3, spring: .smooth)
+            }
+        }
         .scaleEffect(model.isAppeared ? (model.isFloating ? 1.05 : 1) : 0.35, anchor: model.edge.unitPoint)
         .opacity(model.isAppeared ? 1 : 0)
         .position(model.bodyCenter)
@@ -38,19 +81,22 @@ struct NotchRootView: View {
 private struct NotchContent: View {
     @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
+    let home: CompanionHome
+    let link: CompanionLink
 
     var body: some View {
         let horizontal = model.edge.isHorizontal
+        let lane = model.hasResident
         ZStack(alignment: model.edge.alignment) {
             if model.isExpanded {
                 Group {
                     if horizontal {
-                        HorizontalExpanded(model: model, stats: stats)
+                        HorizontalExpanded(model: model, stats: stats, home: home, link: link)
                     } else {
-                        VerticalExpanded(model: model, stats: stats)
+                        VerticalExpanded(model: model, stats: stats, home: home, link: link)
                     }
                 }
-                .scaled(to: NotchMetrics.expanded(horizontal: horizontal), by: model.sizing.scale)
+                .scaled(to: NotchMetrics.expanded(horizontal: horizontal, room: model.showsRoom), by: model.sizing.scale)
                 .transition(.asymmetric(
                     insertion: .modifier(active: Reveal(progress: 0, anchor: model.edge.unitPoint),
                                          identity: Reveal(progress: 1, anchor: model.edge.unitPoint))
@@ -61,14 +107,29 @@ private struct NotchContent: View {
             } else {
                 Group {
                     if horizontal {
-                        HorizontalCollapsed(stats: stats)
+                        HStack(spacing: 0) {
+                            if lane {
+                                CompanionLane(home: home, link: link,
+                                              size: CGSize(width: CompanionMetrics.laneAlong,
+                                                           height: model.sizing.collapsedLayout(horizontal: true).height))
+                                    .padding(.leading, 6)
+                            }
+                            HorizontalCollapsed(stats: stats)
+                        }
                     } else {
-                        VerticalCollapsed(stats: stats, size: model.sizing.collapsedLayout(horizontal: false),
-                                          edge: model.edge)
+                        let clock = model.sizing.collapsedLayout(horizontal: false)
+                        VStack(spacing: 0) {
+                            VerticalCollapsed(stats: stats, size: clock, edge: model.edge)
+                                .frame(width: clock.width, height: clock.height)
+                            if lane {
+                                CompanionLane(home: home, link: link,
+                                              size: CGSize(width: clock.width, height: CompanionMetrics.laneBelow))
+                            }
+                        }
                     }
                 }
-                .id(horizontal)
-                .scaled(to: model.sizing.collapsedLayout(horizontal: horizontal), by: model.sizing.scale)
+                .id(horizontal ? (lane ? 1 : 0) : (lane ? 3 : 2))
+                .scaled(to: model.sizing.collapsedLayout(horizontal: horizontal, lane: lane), by: model.sizing.scale)
                 .transition(.asymmetric(
                     insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.12)),
                     removal: .opacity.animation(.easeOut(duration: 0.1))))
@@ -201,39 +262,124 @@ struct VerticalCollapsed: View {
 private struct HorizontalExpanded: View {
     @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
+    let home: CompanionHome
+    let link: CompanionLink
 
     var body: some View {
-        VStack(spacing: 8) {
-            ExpandedHeader(model: model)
-            HStack(alignment: .center, spacing: 12) {
-                ClockBlock(stats: stats)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                StatRings(model: model, stats: stats, size: 42)
-                Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 70)
-                ActionGrid(showsLabels: false)
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                ExpandedHeader(model: model)
+                HStack(alignment: .center, spacing: 12) {
+                    ClockBlock(stats: stats)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    StatRings(model: model, stats: stats, size: 42)
+                    Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 70)
+                    ActionGrid(showsLabels: false)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 16)
+            .frame(height: NotchMetrics.expanded(horizontal: true).height)
+            if model.showsRoom {
+                CompanionRoom(home: home, link: link,
+                              size: CGSize(width: NotchMetrics.expanded(horizontal: true).width - 28,
+                                           height: CompanionMetrics.roomHorizontal - 14),
+                              openInventory: model.openInventory)
+                    .padding(.bottom, 14)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
-        .padding(.bottom, 16)
     }
 }
 
 private struct VerticalExpanded: View {
     @ObservedObject var model: NotchModel
     @ObservedObject var stats: SystemStats
+    let home: CompanionHome
+    let link: CompanionLink
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            ExpandedHeader(model: model)
-            ClockBlock(stats: stats)
-            StatRings(model: model, stats: stats, size: 52)
-                .frame(maxWidth: .infinity)
-            ActionGrid(showsLabels: true)
-                .frame(maxWidth: .infinity)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 20) {
+                ExpandedHeader(model: model)
+                ClockBlock(stats: stats)
+                StatRings(model: model, stats: stats, size: 52)
+                    .frame(maxWidth: .infinity)
+                ActionGrid(showsLabels: true)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
+            .frame(height: NotchMetrics.expanded(horizontal: false).height, alignment: .top)
+            if model.showsRoom {
+                CompanionRoom(home: home, link: link,
+                              size: CGSize(width: NotchMetrics.expanded(horizontal: false).width - 28,
+                                           height: CompanionMetrics.roomVertical - 16),
+                              openInventory: model.openInventory)
+                    .padding(.bottom, 16)
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 18)
+    }
+}
+
+// MARK: - Companion glow
+
+/// The pink glow around the notch: a soft breathing halo while she has something to tell you,
+/// brighter and quicker while a companion is held over it or on her way in.
+private struct GlowAura: View {
+    let shape: NotchShape
+    let tint: Color
+    let level: Int
+
+    var body: some View {
+        // ~24 fps is plenty for a slow breath, and keeps a long-waiting glow cheap.
+        TimelineView(.animation(minimumInterval: 1 / 24)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let speed = level >= 2 ? 5.5 : 2.2
+            let breath = 0.5 + 0.5 * sin(t * speed)
+            let strength = level == 3 ? 1.0 : (level == 2 ? 0.85 : 0.55 + 0.35 * breath)
+            ZStack {
+                shape.fill(tint).blur(radius: 10 + 6 * breath).opacity(strength * 0.9)
+                shape.fill(tint.opacity(0.6)).blur(radius: 26 + 10 * breath).opacity(strength * 0.7)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// Bubbles rushing into the notch and popping as a companion arrives.
+private struct Gulp: View {
+    let trigger: Int
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            ZStack {
+                ForEach(0..<12, id: \.self) { i in
+                    let a = Double(i) / 12 * 2 * .pi
+                    Circle()
+                        .fill(RadialGradient(colors: [.white.opacity(0.95), tint.opacity(0.75), tint.opacity(0)],
+                                             center: .init(x: 0.35, y: 0.3), startRadius: 0, endRadius: 7))
+                        .frame(width: CGFloat(6 + (i * 7) % 8), height: CGFloat(6 + (i * 7) % 8))
+                        .keyframeAnimator(initialValue: CGFloat(0), trigger: trigger) { content, k in
+                            let r = (1 - k) * max(geo.size.width, geo.size.height) * 0.6
+                            content
+                                .position(x: c.x + cos(a) * r, y: c.y + sin(a) * r * 0.6)
+                                .opacity(k > 0 && k < 1 ? Double(1 - k * 0.6) : 0)
+                                .scaleEffect(k > 0.85 ? 1.6 : 1)
+                        } keyframes: { _ in
+                            KeyframeTrack {
+                                LinearKeyframe(0.001, duration: 0.01)
+                                LinearKeyframe(0.001, duration: Double(i) * 0.02)
+                                CubicKeyframe(1, duration: 0.45)
+                                LinearKeyframe(0, duration: 0.01)
+                            }
+                        }
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
