@@ -64,6 +64,11 @@ final class CompanionCarry {
         }
     }
 
+    /// Brought back over the notch while still held: gone at once (her space draws her again).
+    func vanish() {
+        panel.orderOut(nil)
+    }
+
     /// She couldn't leave (no companion app): shrink back toward the notch.
     func retreat(to p: CGPoint, completion: @escaping () -> Void) {
         let target = CGPoint(x: (p.x - grip.x).rounded(), y: (p.y - size.height + grip.y).rounded())

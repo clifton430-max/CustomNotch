@@ -48,14 +48,18 @@ final class NotchController: NSObject {
     let settings = NotchSettings()
     /// The Terraria Companion who lives in the notch (if any), and her life here.
     let link = CompanionLink()
-    private(set) lazy var home = CompanionHome(link: link)
+    private(set) lazy var home = CompanionHome(link: link, settings: settings)
     private var companionObservers: [AnyCancellable] = []
     private var hasResident = false
     private var showsRoom = false
-    /// Pulling her out: pressed on her in the room, and her held sprite once it's a drag.
-    private var carryDown: CGPoint?
+    /// Pressed on her or a cookie in her space (where), and whether it's become a drag there.
+    private var touch: (target: CompanionHome.Target, down: CGPoint)?
+    private var holding = false
+    /// Pulling her out: her held sprite once she's dragged out past the notch.
     private var carry: CompanionCarry?
-    private lazy var settingsWindow = SettingsWindowController(settings: settings, stats: stats)
+    private lazy var settingsWindow = SettingsWindowController(settings: settings, stats: stats, link: link) { [weak self] in
+        self?.resetPosition()
+    }
     private lazy var detailPanel = ResourceDetailController(stats: stats)
     /// Per-edge sizes, mirrored from `settings` (its publisher fires before the value lands).
     private var sizes: [NotchEdge: NotchSizing] = [:]
@@ -116,6 +120,7 @@ final class NotchController: NSObject {
         model.openSettings = { [weak self] in self?.openSettings() }
         model.openDetail = { [weak self] kind in self?.openDetail(kind) }
         model.openInventory = { [weak self] in self?.openInventory() }
+        model.spawnCookie = { [weak self] in self?.home.spawnCookie() }
 
         sizes = settings.sizes
         sizingObserver = settings.$sizes.removeDuplicates().dropFirst().sink { [weak self] new in
@@ -410,17 +415,13 @@ final class NotchController: NSObject {
         switch event.type {
         case .leftMouseDown:
             mouseDownPoint = p
-            // A press on her in the opened room picks her up (or pats her) instead of the notch.
-            let local = CGPoint(x: event.locationInWindow.x, y: canvas - event.locationInWindow.y)
-            carryDown = model.isExpanded && home.spriteContains(windowPoint: local) ? p : nil
+            // A press on her or a cookie in the opened notch picks it up (or pats her, or sends
+            // her for the cookie) instead of the notch; the controls over her space keep theirs.
+            touchDown(at: p)
             return event
         case .leftMouseDragged:
-            if let down = carryDown {
-                if carry == nil {
-                    guard hypot(p.x - down.x, p.y - down.y) > 4 else { return nil }
-                    beginCarry(at: p)
-                }
-                updateCarry(at: p)
+            if let touch {
+                dragTouch(touch.target, from: touch.down, to: p)
                 return nil
             }
             guard let down = mouseDownPoint else { return event }
@@ -432,9 +433,9 @@ final class NotchController: NSObject {
             return nil
         case .leftMouseUp:
             mouseDownPoint = nil
-            if carryDown != nil {
-                carryDown = nil
-                if carry != nil { endCarry(at: p) } else { pet() }
+            if let t = touch {
+                touch = nil
+                endTouch(t.target, at: p)
                 return nil
             }
             if isDragging {
@@ -513,22 +514,85 @@ final class NotchController: NSObject {
 
     // MARK: Companion
 
+    /// A screen point (y-up) in the notch window's top-left coordinates, where SwiftUI lays out.
+    private func windowPoint(_ p: CGPoint) -> CGPoint {
+        let origin = panel.frame.origin
+        return CGPoint(x: p.x - origin.x, y: canvas - (p.y - origin.y))
+    }
+
+    private func touchDown(at p: CGPoint) {
+        touch = nil
+        holding = false
+        guard model.isExpanded else { return }
+        let target = home.target(at: windowPoint(p))
+        if target != .none, target != .control { touch = (target, p) }
+    }
+
+    /// Dragging her or a cookie: around her space, and her out of the notch past its edge (back
+    /// in again if you change your mind).
+    private func dragTouch(_ target: CompanionHome.Target, from down: CGPoint, to p: CGPoint) {
+        if !holding {
+            guard hypot(p.x - down.x, p.y - down.y) > 4 else { return }
+            holding = true
+            samples = [(CACurrentMediaTime(), p)]
+            home.grab(target, at: windowPoint(down))
+            NSCursor.closedHand.push()
+        }
+        let now = CACurrentMediaTime()
+        samples.append((now, p))
+        samples.removeAll { now - $0.time > 0.1 }
+        guard target == .her else {
+            home.drag(to: windowPoint(p))
+            return
+        }
+        let outside = !hoverRect.insetBy(dx: -10, dy: -10).contains(p)
+        if outside, carry == nil {
+            beginCarry(at: p)
+        } else if !outside, let c = carry {
+            // Back over the notch: she's in her space again, still in your hand.
+            carry = nil
+            c.vanish()
+            home.sim.carried = false
+            home.grab(.her, at: windowPoint(p))
+        }
+        if carry != nil { updateCarry(at: p) } else { home.drag(to: windowPoint(p)) }
+    }
+
+    private func endTouch(_ target: CompanionHome.Target, at p: CGPoint) {
+        defer { holding = false }
+        guard holding else {
+            // A click.
+            switch target {
+            case .her: pet()
+            case .cookie(let id): home.tap(cookie: id)
+            default: break
+            }
+            return
+        }
+        NSCursor.pop()
+        if carry != nil {
+            endCarry(at: p)
+        } else {
+            home.release(velocity: releaseVelocity(at: p))
+        }
+        wakeHover()
+    }
+
     private func pet() {
         home.petted()
         Task { await link.send("pet") }
     }
 
     private func beginCarry(at p: CGPoint) {
-        guard let atlas = link.atlas else { carryDown = nil; return }
+        guard let atlas = link.atlas else { return }
         detailPanel.close()
+        home.release(velocity: .zero)
         home.sim.carried = true
         let roomScale = atlas.scale(forBodyHeight: edge.isHorizontal ? 40 : 44) * sizing.scale
         let c = CompanionCarry(atlas: atlas, roomScale: roomScale)
         carry = c
-        samples = [(CACurrentMediaTime(), p)]
         panel.ignoresMouseEvents = false
         c.show(at: p)
-        NSCursor.closedHand.push()
     }
 
     private func updateCarry(at p: CGPoint) {
@@ -548,7 +612,6 @@ final class NotchController: NSObject {
     /// Let go: outside the notch she goes back to the desktop right there, keeping the throw;
     /// over the notch (or with no companion app to take her) she drops back into her room.
     private func endCarry(at p: CGPoint) {
-        NSCursor.pop()
         guard let c = carry else { return }
         carry = nil
         let v = releaseVelocity(at: p)
@@ -688,7 +751,7 @@ final class NotchController: NSObject {
     }
 
     private func pollHover() {
-        guard !isDragging, carry == nil, panel != nil else { return }
+        guard !isDragging, carry == nil, !holding, panel != nil else { return }
         let inside = hoverRect.contains(NSEvent.mouseLocation)
         if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
 
@@ -697,6 +760,9 @@ final class NotchController: NSObject {
             return
         }
         guard !isSpringing else { return }
+
+        // She notices the pointer over her space (and a long touch).
+        home.hover(model.isExpanded && inside ? windowPoint(NSEvent.mouseLocation) : nil)
 
         let now = CACurrentMediaTime()
         if inside {
@@ -784,6 +850,62 @@ final class NotchController: NSObject {
         case "pin": model.isPinned.toggle()
         case "pet": pet()
         case "inventory": openInventory()
+        case "cookie": home.spawnCookie()
+        case "fetch":
+            if let c = home.sim.cookies.first { home.tap(cookie: c.id) }
+        case "dismiss":
+            if let id = home.shownMessage { home.dismissMessage(id) }
+        case "toss":
+            // "toss fx,fy,vx,vy": pick her up, carry her to that fraction of her space and let go
+            // moving at vx,vy (screen points/s, y-up).
+            guard parts.count > 1, let space = home.space, let rect = home.spriteRect else { return }
+            let v = parts[1].split(separator: ",").compactMap { Double($0) }.map { CGFloat($0) }
+            guard v.count >= 2 else { return }
+            home.grab(.her, at: CGPoint(x: rect.midX, y: rect.midY))
+            home.drag(to: CGPoint(x: space.frame.minX + space.frame.width * v[0], y: space.frame.minY + space.frame.height * v[1]))
+            home.release(velocity: CGVector(dx: v.count > 2 ? v[2] : 0, dy: v.count > 3 ? v[3] : 0))
+        case "feed":
+            // Drag the first cookie onto her and drop it.
+            guard let c = home.sim.cookies.first, let space = home.space, let rect = home.spriteRect else { return }
+            let r = home.sim.cookieRect(c)
+            home.grab(.cookie(c.id), at: CGPoint(x: space.frame.minX + r.midX * space.scale, y: space.frame.minY + r.midY * space.scale))
+            home.drag(to: CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.3))
+            home.release(velocity: .zero)
+        case "mouse":
+            // "mouse fx,fy fx2,fy2[,steps]": press at that fraction of her space ("her" or "cookie"
+            // for where they are), drag to the second (fractions past 0…1 leave the space) and let
+            // go, through the real mouse handling. Steps 0 is a click.
+            guard parts.count > 1, let space = home.space else { return }
+            var words = parts[1]
+            let local: CGRect? = words.hasPrefix("her") ? home.sim.body
+                : words.hasPrefix("cookie") ? home.sim.cookies.first.map { home.sim.cookieRect($0) } : nil
+            if let local {
+                words = "\(local.midX / space.size.width),\(local.midY / space.size.height)" + words.drop { $0 != " " }
+            }
+            let v = words.split(whereSeparator: { $0 == " " || $0 == "," }).compactMap { Double($0) }.map { CGFloat($0) }
+            guard v.count >= 4 else { return }
+            let screen = { (fx: CGFloat, fy: CGFloat) -> CGPoint in
+                let w = CGPoint(x: space.frame.minX + space.frame.width * fx, y: space.frame.minY + space.frame.height * fy)
+                return CGPoint(x: self.panel.frame.minX + w.x, y: self.panel.frame.minY + self.canvas - w.y)
+            }
+            let start = screen(v[0], v[1]), end = screen(v[2], v[3])
+            let steps = v.count > 4 ? v[4] : 20
+            touchDown(at: start)
+            guard let t = touch else { return }
+            var i = 0
+            Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { timer in
+                MainActor.assumeIsolated {
+                    i += 1
+                    let k = min(1, CGFloat(i) / steps)
+                    let p = CGPoint(x: start.x + (end.x - start.x) * k, y: start.y + (end.y - start.y) * k)
+                    if steps > 0 { self.dragTouch(t.target, from: start, to: p) }
+                    if k >= 1 {
+                        timer.invalidate()
+                        self.touch = nil
+                        self.endTouch(t.target, at: p)
+                    }
+                }
+            }
         case "carry":
             guard parts.count > 1, let rect = home.spriteRect else { return }
             let v = parts[1].split(separator: ",").compactMap { Double($0) }
@@ -793,7 +915,6 @@ final class NotchController: NSObject {
             let origin = panel.frame.origin
             let start = CGPoint(x: origin.x + rect.midX, y: origin.y + canvas - rect.midY)
             let end = CGPoint(x: v[0], y: v[1])
-            carryDown = start
             beginCarry(at: start)
             var i = 0
             Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { timer in
@@ -804,7 +925,6 @@ final class NotchController: NSObject {
                     self.updateCarry(at: p)
                     if t >= 1 {
                         timer.invalidate()
-                        self.carryDown = nil
                         self.endCarry(at: p)
                     }
                 }

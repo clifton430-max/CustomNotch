@@ -268,7 +268,7 @@ private struct HorizontalExpanded: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
-                ExpandedHeader(model: model)
+                ExpandedHeader(model: model, settings: home.settings)
                 HStack(alignment: .center, spacing: 12) {
                     ClockBlock(stats: stats)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -282,10 +282,10 @@ private struct HorizontalExpanded: View {
             .padding(.bottom, 16)
             .frame(height: NotchMetrics.expanded(horizontal: true).height)
             if model.showsRoom {
-                CompanionRoom(home: home, link: link,
-                              size: CGSize(width: NotchMetrics.expanded(horizontal: true).width - 28,
-                                           height: CompanionMetrics.roomHorizontal - 14),
-                              openInventory: model.openInventory)
+                CompanionSpace(home: home, link: link,
+                               size: CGSize(width: NotchMetrics.expanded(horizontal: true).width - 28,
+                                            height: CompanionMetrics.roomHorizontal - 14),
+                               openInventory: model.openInventory)
                     .padding(.bottom, 14)
             }
         }
@@ -301,7 +301,7 @@ private struct VerticalExpanded: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 20) {
-                ExpandedHeader(model: model)
+                ExpandedHeader(model: model, settings: home.settings)
                 ClockBlock(stats: stats)
                 StatRings(model: model, stats: stats, size: 52)
                     .frame(maxWidth: .infinity)
@@ -312,10 +312,10 @@ private struct VerticalExpanded: View {
             .padding(.vertical, 18)
             .frame(height: NotchMetrics.expanded(horizontal: false).height, alignment: .top)
             if model.showsRoom {
-                CompanionRoom(home: home, link: link,
-                              size: CGSize(width: NotchMetrics.expanded(horizontal: false).width - 28,
-                                           height: CompanionMetrics.roomVertical - 16),
-                              openInventory: model.openInventory)
+                CompanionSpace(home: home, link: link,
+                               size: CGSize(width: NotchMetrics.expanded(horizontal: false).width - 28,
+                                            height: CompanionMetrics.roomVertical - 16),
+                               openInventory: model.openInventory)
                     .padding(.bottom, 16)
             }
         }
@@ -383,10 +383,12 @@ private struct Gulp: View {
     }
 }
 
-/// Date on the left; pin and settings controls in the top-right corner. The controls only
-/// exist while the notch is open on hover, and settle in just after the panel does.
+/// Date on the left; pin, cookie (with a companion inside) and settings controls in the
+/// top-right corner. The controls only exist while the notch is open on hover, and settle in
+/// just after the panel does.
 private struct ExpandedHeader: View {
     @ObservedObject var model: NotchModel
+    @ObservedObject var settings: NotchSettings
     @State private var showsControls = false
 
     var body: some View {
@@ -401,6 +403,10 @@ private struct ExpandedHeader: View {
             Spacer(minLength: 4)
             Group {
                 PinButton(isPinned: $model.isPinned)
+                if model.hasResident && settings.showsCookieButton {
+                    CookieButton(action: model.spawnCookie)
+                        .transition(.scale(scale: 0.5).combined(with: .opacity))
+                }
                 HeaderIconButton(symbol: "gearshape.fill", help: "Notch Settings", spinsOnHover: true,
                                  action: model.openSettings)
             }
@@ -436,6 +442,39 @@ private struct HeaderIconButton: View {
         .buttonStyle(PressableStyle())
         .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
         .help(help)
+    }
+}
+
+/// Drops a cookie into her space; sized and coloured like the header's other buttons.
+private struct CookieButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+    @State private var dropped = 0
+
+    var body: some View {
+        Button {
+            dropped += 1
+            action()
+        } label: {
+            CookieGlyph()
+                .fill(.white.opacity(hovering ? 0.9 : 0.45), style: FillStyle(eoFill: true))
+                .frame(width: 11.5, height: 11.5)
+                .rotationEffect(.degrees(hovering ? -18 : 0))
+                .keyframeAnimator(initialValue: CGFloat(0), trigger: dropped) { content, y in
+                    content.offset(y: y)
+                } keyframes: { _ in
+                    KeyframeTrack {
+                        SpringKeyframe(3, duration: 0.1, spring: .snappy)
+                        SpringKeyframe(0, duration: 0.3, spring: .bouncy)
+                    }
+                }
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(.white.opacity(hovering ? 0.12 : 0)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(PressableStyle())
+        .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
+        .help("Give her a cookie")
     }
 }
 

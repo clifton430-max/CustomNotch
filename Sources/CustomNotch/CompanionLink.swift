@@ -41,7 +41,7 @@ final class CompanionLink: ObservableObject {
         let hover: String
     }
 
-    /// Something she said, kept until it's been read (and a while after, to look back on).
+    /// Something she said, kept until it's dismissed, or until a while after it's been read.
     struct Message: Codable, Identifiable, Equatable {
         let id: String
         let character: String
@@ -50,6 +50,8 @@ final class CompanionLink: ObservableObject {
         let date: Date
         let colors: Colors?
         var read: Bool
+        /// When it was read (older saved messages don't have it: their own date stands in).
+        var readAt: Date?
     }
 
     @Published private(set) var connected = false
@@ -90,7 +92,8 @@ final class CompanionLink: ObservableObject {
     private static let messagesKey = "companionMessages"
     private static let glowKey = "companionGlowing"
     private static let seenKey = "companionSeen"
-    private static let keep = 60
+    /// At most this many kept; the oldest read ones go first.
+    private static let keep = 30
 
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -236,12 +239,30 @@ final class CompanionLink: ObservableObject {
     func markRead(_ id: String) {
         guard let i = messages.firstIndex(where: { $0.id == id }), !messages[i].read else { return }
         messages[i].read = true
+        messages[i].readAt = Date()
         saveMessages()
     }
 
-    func clearHistory() {
-        messages.removeAll { $0.read }
+    /// Put one message away (read or not).
+    func dismiss(_ id: String) {
+        guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages.remove(at: i)
+        if unread.isEmpty { glowing = false }
         saveMessages()
+    }
+
+    func clearAll() {
+        messages.removeAll()
+        glowing = false
+        saveMessages()
+    }
+
+    /// Let read messages go once they've been read for `lifetime` seconds (nil keeps them).
+    func expireRead(after lifetime: TimeInterval?, now: Date = Date()) {
+        guard let lifetime else { return }
+        let before = messages.count
+        messages.removeAll { m in m.read && now.timeIntervalSince(m.readAt ?? m.date) > lifetime }
+        if messages.count != before { saveMessages() }
     }
 
     private func saveMessages() {

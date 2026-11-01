@@ -5,31 +5,34 @@ import SwiftUI
 final class SettingsWindowController {
     private let settings: NotchSettings
     private let stats: SystemStats
+    private let link: CompanionLink
+    private let resetPosition: () -> Void
     private var window: NSWindow?
 
-    init(settings: NotchSettings, stats: SystemStats) {
+    static let size = CGSize(width: 860, height: 660)
+
+    init(settings: NotchSettings, stats: SystemStats, link: CompanionLink, resetPosition: @escaping () -> Void) {
         self.settings = settings
         self.stats = stats
+        self.link = link
+        self.resetPosition = resetPosition
     }
 
     func show() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(origin: .zero, size: SettingsRoute.home.windowSize),
-                             styleMask: [.titled, .closable, .fullSizeContentView],
+            let w = NSWindow(contentRect: NSRect(origin: .zero, size: Self.size),
+                             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                              backing: .buffered, defer: false)
             w.title = "Notch Settings"
             w.titleVisibility = .hidden
             w.titlebarAppearsTransparent = true
             w.appearance = NSAppearance(named: .darkAqua)
-            // Clear so the SwiftUI glass can blur the desktop behind the window.
-            w.isOpaque = false
-            w.backgroundColor = .clear
+            w.isOpaque = true
+            w.backgroundColor = .black
             w.isReleasedWhenClosed = false
             w.animationBehavior = .alertPanel
             w.level = .floating
-            let root = SettingsView(settings: settings, stats: stats) { [weak self] size in
-                self?.resizeWindow(to: size)
-            }
+            let root = SettingsView(settings: settings, stats: stats, link: link, resetPosition: resetPosition)
             let host = NSHostingView(rootView: root)
             host.sizingOptions = []
             w.contentView = host
@@ -39,45 +42,69 @@ final class SettingsWindowController {
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
-
-    /// Grows or shrinks the window around its top edge so pages can have their own size.
-    private func resizeWindow(to size: CGSize) {
-        guard let w = window else { return }
-        let old = w.frame
-        var frame = NSRect(x: old.midX - size.width / 2, y: old.maxY - size.height,
-                           width: size.width, height: size.height)
-        if let visible = w.screen?.visibleFrame {
-            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
-            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.36
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
-            w.animator().setFrame(frame, display: true)
-        }
-    }
 }
 
 // MARK: - Navigation
 
-/// Every settings page. Adding a page means adding a case here, a row on the home page that
-/// opens it, and a branch in `SettingsView.page(for:)`.
-enum SettingsRoute: Hashable {
-    case home
-    case appearance
+/// Every settings page, in sidebar order. Adding a page means adding a case here (with its
+/// sidebar group, icon and search keywords) and a branch in `SettingsView.page(for:)`.
+enum SettingsPage: String, CaseIterable, Hashable {
+    case general, appearance, edges, companion, about
 
     var title: String {
         switch self {
-        case .home: "Notch Settings"
+        case .general: "General"
         case .appearance: "Appearance & Size"
+        case .edges: "Edge Presets"
+        case .companion: "Companion"
+        case .about: "About"
         }
     }
 
-    var windowSize: CGSize {
+    var symbol: String {
         switch self {
-        case .home: CGSize(width: 500, height: 624)
-        case .appearance: CGSize(width: 760, height: 668)
+        case .general: "gearshape.fill"
+        case .appearance: "rectangle.topthird.inset.filled"
+        case .edges: "rectangle.dashed"
+        case .companion: "heart.fill"
+        case .about: "info.circle.fill"
         }
+    }
+
+    var colors: [Color] {
+        switch self {
+        case .general: Theme.graphite
+        case .appearance: Theme.violet
+        case .edges: Theme.blue
+        case .companion: Theme.pink
+        case .about: Theme.graphite
+        }
+    }
+
+    /// Sidebar groups, like System Settings' clusters of related panes.
+    var group: Int {
+        switch self {
+        case .general: 0
+        case .appearance, .edges: 1
+        case .companion: 2
+        case .about: 3
+        }
+    }
+
+    /// Extra words the sidebar search matches.
+    var keywords: [String] {
+        switch self {
+        case .general: ["position", "reset", "docked", "overview"]
+        case .appearance: ["size", "width", "height", "scale", "resize", "edge"]
+        case .edges: ["top", "bottom", "left", "right", "preset", "size"]
+        case .companion: ["terraria", "cookie", "messages", "inventory", "pet"]
+        case .about: ["version"]
+        }
+    }
+
+    func matches(_ query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return q.isEmpty || title.lowercased().contains(q) || keywords.contains { $0.contains(q) }
     }
 }
 
@@ -85,114 +112,301 @@ private enum Theme {
     static let secondary = Color.white.opacity(0.55)
     static let tertiary = Color.white.opacity(0.35)
     static let separator = Color.white.opacity(0.08)
+    static let sidebar = Color(white: 0.085)
+    static let detail = Color(white: 0.045)
+    static let accent = Color(red: 0.04, green: 0.52, blue: 1)
     static let page = Animation.spring(response: 0.44, dampingFraction: 0.9)
     static let control = Animation.spring(response: 0.32, dampingFraction: 0.82)
     static let violet = [Color(red: 0.47, green: 0.42, blue: 1), Color(red: 0.74, green: 0.36, blue: 0.96)]
-    static let graphite = [Color(white: 0.42), Color(white: 0.24)]
+    static let graphite = [Color(white: 0.52), Color(white: 0.3)]
+    static let blue = [Color(red: 0.3, green: 0.62, blue: 1), Color(red: 0.12, green: 0.4, blue: 0.95)]
+    static let pink = [Color(red: 1, green: 0.45, blue: 0.7), Color(red: 0.92, green: 0.2, blue: 0.5)]
+    static let green = [Color(red: 0.35, green: 0.85, blue: 0.45), Color(red: 0.15, green: 0.65, blue: 0.3)]
+    static let orange = [Color(red: 1, green: 0.7, blue: 0.3), Color(red: 0.95, green: 0.45, blue: 0.15)]
 }
 
 private struct SettingsView: View {
     @ObservedObject var settings: NotchSettings
     @ObservedObject var stats: SystemStats
-    let resizeWindow: (CGSize) -> Void
+    @ObservedObject var link: CompanionLink
+    let resetPosition: () -> Void
 
-    @State private var route: SettingsRoute = .home
-    @State private var forward = true
+    @State private var page: SettingsPage = .general
+    @State private var history: [SettingsPage] = []
+    @State private var future: [SettingsPage] = []
     @State private var editingEdge: NotchEdge = .right
+    @State private var query = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            Toolbar(route: route) { navigate(to: .home) }
-            ZStack(alignment: .top) {
-                page(for: route)
-                    .id(route)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .transition(.asymmetric(
-                        insertion: .offset(x: forward ? 60 : -60).combined(with: .opacity),
-                        removal: .offset(x: forward ? -60 : 60).combined(with: .opacity)))
+        HStack(spacing: 0) {
+            Sidebar(settings: settings, page: page, query: $query) { navigate(to: $0) }
+                .frame(width: 228)
+            Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
+            VStack(spacing: 0) {
+                Toolbar(title: page.title, canGoBack: !history.isEmpty, canGoForward: !future.isEmpty,
+                        back: goBack, forward: goForward)
+                ScrollView {
+                    pageView(for: page)
+                        .id(page)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .transition(.opacity.combined(with: .offset(y: 6)))
+                }
+                .scrollIndicators(.automatic)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
+            .background(Theme.detail)
         }
         .foregroundStyle(.white)
-        .background(GlassBackground(tint: 0.5).ignoresSafeArea())
+        .background(Theme.detail.ignoresSafeArea())
+        .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
+        .tint(Theme.accent)
         #if DEBUG
         .onReceive(DistributedNotificationCenter.default().publisher(for: .init("CustomNotch.debugRoute"))) { note in
-            if let edge = (note.object as? String).flatMap(NotchEdge.init(rawValue:)) {
+            // An edge name opens its size; a page name opens that page.
+            let name = note.object as? String
+            if let edge = name.flatMap(NotchEdge.init(rawValue:)) {
                 navigate(to: .appearance, editing: edge)
+            } else if let p = name.flatMap(SettingsPage.init(rawValue:)) {
+                navigate(to: p)
             } else {
-                navigate(to: route == .home ? .appearance : .home)
+                navigate(to: page == .general ? .appearance : .general)
             }
         }
         #endif
     }
 
     @ViewBuilder
-    private func page(for route: SettingsRoute) -> some View {
-        switch route {
-        case .home:
-            HomePage(settings: settings, stats: stats) { edge in navigate(to: .appearance, editing: edge) }
+    private func pageView(for page: SettingsPage) -> some View {
+        switch page {
+        case .general:
+            GeneralPage(settings: settings, stats: stats, resetPosition: resetPosition,
+                        open: { navigate(to: $0) })
         case .appearance:
             AppearancePage(settings: settings, stats: stats, edge: $editingEdge)
+        case .edges:
+            EdgesPage(settings: settings) { edge in navigate(to: .appearance, editing: edge) }
+        case .companion:
+            CompanionPage(settings: settings, link: link)
+        case .about:
+            AboutPage()
         }
     }
 
-    private func navigate(to next: SettingsRoute, editing edge: NotchEdge? = nil) {
-        guard next != route else { return }
-        if let edge { editingEdge = edge } else if next == .appearance { editingEdge = settings.dockedEdge }
-        // Set the direction first so the outgoing page picks up the matching transition.
-        forward = next != .home
-        resizeWindow(next.windowSize)
-        DispatchQueue.main.async {
-            withAnimation(Theme.page) { route = next }
-        }
+    private func navigate(to next: SettingsPage, editing edge: NotchEdge? = nil) {
+        if let edge { editingEdge = edge } else if next == .appearance, next != page { editingEdge = settings.dockedEdge }
+        guard next != page else { return }
+        history.append(page)
+        future.removeAll()
+        withAnimation(Theme.page) { page = next }
+    }
+
+    private func goBack() {
+        guard let previous = history.popLast() else { return }
+        future.append(page)
+        withAnimation(Theme.page) { page = previous }
+    }
+
+    private func goForward() {
+        guard let next = future.popLast() else { return }
+        history.append(page)
+        withAnimation(Theme.page) { page = next }
     }
 }
 
-/// A System Settings-style toolbar: room for the traffic lights, a back button on inner
-/// pages, and the page title.
-private struct Toolbar: View {
-    let route: SettingsRoute
-    let back: () -> Void
+// MARK: - Sidebar
+
+/// System Settings' sidebar: room for the traffic lights, a search field, the notch's own card,
+/// then the panes in groups with coloured icon tiles.
+private struct Sidebar: View {
+    @ObservedObject var settings: NotchSettings
+    let page: SettingsPage
+    @Binding var query: String
+    let select: (SettingsPage) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Color.clear.frame(width: 64)
-            if route != .home {
-                BackButton(action: back)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+        let shown = SettingsPage.allCases.filter { $0.matches(query) }
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: 46)
+            SearchField(text: $query)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    if query.isEmpty {
+                        NotchCard(settings: settings, selected: false) { select(.general) }
+                            .padding(.bottom, 8)
+                    }
+                    ForEach(Array(shown.enumerated()), id: \.element) { index, item in
+                        if index > 0, shown[index - 1].group != item.group {
+                            Color.clear.frame(height: 10)
+                        }
+                        SidebarRow(page: item, selected: item == page) { select(item) }
+                    }
+                    if shown.isEmpty {
+                        Text("No Results")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.tertiary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 20)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 12)
             }
-            Text(route.title)
-                .font(.system(size: 14, weight: .semibold))
-                .id(route)
-                .transition(.opacity.combined(with: .offset(y: 4)))
-            Spacer()
+            .scrollIndicators(.never)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 52)
-        .animation(Theme.page, value: route)
-        .overlay(alignment: .bottom) { Rectangle().fill(Theme.separator).frame(height: 1) }
+        .background(Theme.sidebar)
+        .onSubmit { if let first = shown.first { select(first) } }
     }
 }
 
-private struct BackButton: View {
+private struct SearchField: View {
+    @Binding var text: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.tertiary)
+            TextField("Search", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .focused($focused)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.white.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .strokeBorder(focused ? Theme.accent.opacity(0.8) : .white.opacity(0.06), lineWidth: focused ? 2 : 1))
+    }
+}
+
+/// Like the Apple Account card at the top of System Settings' sidebar.
+private struct NotchCard: View {
+    @ObservedObject var settings: NotchSettings
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let edge = settings.dockedEdge
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().fill(LinearGradient(colors: [Color(white: 0.3), Color(white: 0.14)], startPoint: .top, endPoint: .bottom))
+                    Capsule().fill(.black)
+                        .frame(width: edge.isHorizontal ? 22 : 8, height: edge.isHorizontal ? 8 : 22)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge.alignment)
+                        .padding(edge.isHorizontal ? 6 : 6)
+                }
+                .frame(width: 34, height: 34)
+                .overlay(Circle().strokeBorder(.white.opacity(0.14)))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("CustomNotch")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Docked \(edge.title) · \(pointSize(settings.sizing(for: edge), on: edge))")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(selected ? .white.opacity(0.8) : Theme.secondary)
+                        .lineLimit(1)
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(selected ? Theme.accent : .white.opacity(hovering ? 0.05 : 0)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+    }
+}
+
+private struct SidebarRow: View {
+    let page: SettingsPage
+    let selected: Bool
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 24)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(.white.opacity(hovering ? 0.12 : 0.06)))
+            HStack(spacing: 8) {
+                IconTile(symbol: page.symbol, colors: page.colors, size: 20)
+                Text(page.title)
+                    .font(.system(size: 13))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 28)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(selected ? Theme.accent : .white.opacity(hovering ? 0.05 : 0)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { h in withAnimation(.easeOut(duration: 0.1)) { hovering = h } }
+    }
+}
+
+/// The detail column's toolbar: back and forward, then the page title, like System Settings.
+private struct Toolbar: View {
+    let title: String
+    let canGoBack: Bool
+    let canGoForward: Bool
+    let back: () -> Void
+    let forward: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            NavButton(symbol: "chevron.left", enabled: canGoBack, help: "Back", action: back)
+                .keyboardShortcut("[", modifiers: .command)
+            NavButton(symbol: "chevron.right", enabled: canGoForward, help: "Forward", action: forward)
+                .keyboardShortcut("]", modifiers: .command)
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .padding(.leading, 6)
+                .id(title)
+                .transition(.opacity)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 52)
+        .animation(Theme.page, value: title)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.separator).frame(height: 1) }
+    }
+}
+
+private struct NavButton: View {
+    let symbol: String
+    let enabled: Bool
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 26, height: 24)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(hovering && enabled ? 0.1 : 0)))
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle(scale: 0.92))
-        .keyboardShortcut("[", modifiers: .command)
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
-        .help("Back")
+        .disabled(!enabled)
+        .opacity(enabled ? 0.85 : 0.3)
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+        .help(help)
     }
 }
 
@@ -210,26 +424,90 @@ private struct PressStyle: ButtonStyle {
 }
 
 private extension View {
-    /// A rounded glass group, like the inset sections in System Settings.
-    func glassGroup(cornerRadius: CGFloat = 12) -> some View {
+    /// A rounded group, like the inset sections in System Settings.
+    func glassGroup(cornerRadius: CGFloat = 10) -> some View {
         background(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.white.opacity(0.06))
+                .fill(.white.opacity(0.05))
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(LinearGradient(colors: [.white.opacity(0.14), .white.opacity(0.05)],
-                                                     startPoint: .top, endPoint: .bottom))))
+                        .strokeBorder(.white.opacity(0.08))))
     }
 }
 
-private struct GroupHeader: View {
-    let title: String
+/// A page's content column: centred, at System Settings' reading width.
+private struct PageColumn<Content: View>: View {
+    @ViewBuilder let content: Content
 
     var body: some View {
-        Text(title)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Theme.secondary)
-            .padding(.leading, 6)
+        VStack(alignment: .leading, spacing: 22) { content }
+            .frame(maxWidth: 580, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 18)
+            .padding(.bottom, 28)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+/// A titled form section: a heading, its rows in a rounded group, and an optional footnote.
+private struct FormSection<Content: View>: View {
+    var title: String?
+    var footer: String?
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let title {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.leading, 2)
+            }
+            VStack(spacing: 0) { content }
+                .glassGroup()
+            if let footer {
+                Text(footer)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
+        }
+    }
+}
+
+/// One row of a form section: label (and description) on the left, its control on the right.
+private struct FormRow<Control: View>: View {
+    let title: String
+    var detail: String?
+    var symbol: String?
+    var colors: [Color] = Theme.graphite
+    var divider = true
+    @ViewBuilder let control: Control
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if let symbol { IconTile(symbol: symbol, colors: colors, size: 22) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 13))
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 12)
+                control
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, detail == nil ? 9 : 8)
+            .frame(minHeight: 40)
+            if divider {
+                Rectangle().fill(Theme.separator).frame(height: 1)
+                    .padding(.leading, symbol == nil ? 12 : 44)
+            }
+        }
     }
 }
 
@@ -256,38 +534,64 @@ private struct NavigationRow<Trailing: View>: View {
     let symbol: String
     let colors: [Color]
     let title: String
+    var divider = true
     let action: () -> Void
     @ViewBuilder let trailing: Trailing
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                IconTile(symbol: symbol, colors: colors)
-                Text(title)
-                    .font(.system(size: 13))
-                Spacer(minLength: 8)
-                trailing
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Theme.secondary)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(hovering ? Color.white.opacity(0.7) : Theme.tertiary)
-                    .offset(x: hovering ? 1.5 : 0)
+        VStack(spacing: 0) {
+            Button(action: action) {
+                HStack(spacing: 10) {
+                    IconTile(symbol: symbol, colors: colors, size: 22)
+                    Text(title)
+                        .font(.system(size: 13))
+                    Spacer(minLength: 8)
+                    trailing
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(hovering ? Color.white.opacity(0.7) : Theme.tertiary)
+                        .offset(x: hovering ? 1.5 : 0)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                .background(Color.white.opacity(hovering ? 0.04 : 0))
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .frame(height: 42)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(hovering ? 0.06 : 0)))
-            .contentShape(Rectangle())
+            .buttonStyle(PressStyle(scale: 0.995))
+            .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+            if divider {
+                Rectangle().fill(Theme.separator).frame(height: 1).padding(.leading, 44)
+            }
         }
-        .buttonStyle(PressStyle(scale: 0.99))
-        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
     }
 }
 
-private struct RowSeparator: View {
+/// A plain push button, System Settings style.
+private struct FormButton: View {
+    let title: String
+    var role: ButtonRole?
+    var isEnabled = true
+    let action: () -> Void
+    @State private var hovering = false
+
     var body: some View {
-        Rectangle().fill(Theme.separator).frame(height: 1).padding(.leading, 44).padding(.trailing, 10)
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(role == .destructive ? Color(red: 1, green: 0.42, blue: 0.4) : .white)
+                .padding(.horizontal, 11)
+                .frame(height: 24)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(.white.opacity(hovering && isEnabled ? 0.18 : 0.11)))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(.white.opacity(0.08)))
+        }
+        .buttonStyle(PressStyle(scale: 0.96))
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.4)
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
     }
 }
 
@@ -368,59 +672,65 @@ private extension View {
     }
 }
 
-// MARK: - Home
+// MARK: - General
 
-private struct HomePage: View {
+private struct GeneralPage: View {
     @ObservedObject var settings: NotchSettings
     @ObservedObject var stats: SystemStats
-    let openAppearance: (NotchEdge?) -> Void
+    let resetPosition: () -> Void
+    let open: (SettingsPage) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HeroCard(settings: settings, stats: stats) { openAppearance(nil) }
+        let edge = settings.dockedEdge
+        let sizing = settings.sizing(for: edge)
+        PageColumn {
+            HeroCard(settings: settings, stats: stats) { open(.appearance) }
 
-            VStack(alignment: .leading, spacing: 7) {
-                GroupHeader(title: "Appearance")
-                VStack(spacing: 0) {
-                    NavigationRow(symbol: "rectangle.topthird.inset.filled", colors: Theme.violet,
-                                  title: "Appearance & Size", action: { openAppearance(nil) }) {
-                        Text(percent(settings.sizing(for: settings.dockedEdge).scale))
-                            .monospacedDigit()
+            FormSection(title: "Notch") {
+                FormRow(title: "Docked edge", detail: "Drag the notch to any screen edge to move it there.",
+                        symbol: edge.symbol, colors: Theme.blue) {
+                    HStack(spacing: 6) {
+                        DockedBadge()
+                        Text(edge.title).foregroundStyle(Theme.secondary)
                     }
+                    .font(.system(size: 12.5))
                 }
-                .padding(4)
-                .glassGroup()
+                FormRow(title: "Size", symbol: "ruler", colors: Theme.violet) {
+                    Text(pointSize(sizing, on: edge))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.secondary)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                }
+                FormRow(title: "Overall size", symbol: "arrow.up.left.and.arrow.down.right", colors: Theme.violet, divider: false) {
+                    Text(percent(sizing.scale))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.secondary)
+                        .monospacedDigit()
+                }
             }
 
-            VStack(alignment: .leading, spacing: 7) {
-                GroupHeader(title: "Edge Presets")
-                VStack(spacing: 0) {
-                    ForEach(Array(NotchEdge.allCases.enumerated()), id: \.element) { index, edge in
-                        if index > 0 { RowSeparator() }
-                        NavigationRow(symbol: edge.symbol, colors: Theme.graphite, title: edge.title,
-                                      action: { openAppearance(edge) }) {
-                            HStack(spacing: 8) {
-                                if edge == settings.dockedEdge { DockedBadge() }
-                                Text(pointSize(settings.sizing(for: edge), on: edge))
-                                    .monospacedDigit()
-                                    .contentTransition(.numericText())
-                            }
-                        }
-                    }
+            FormSection(title: "Customize") {
+                NavigationRow(symbol: SettingsPage.appearance.symbol, colors: Theme.violet, title: "Appearance & Size",
+                              action: { open(.appearance) }) {
+                    Text(percent(sizing.scale)).monospacedDigit()
                 }
-                .padding(4)
-                .glassGroup()
-                Text("Each edge remembers its own size. Move the notch and it switches automatically.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.tertiary)
-                    .padding(.horizontal, 6)
+                NavigationRow(symbol: SettingsPage.edges.symbol, colors: Theme.blue, title: "Edge Presets",
+                              action: { open(.edges) }) {
+                    Text("4 edges")
+                }
+                NavigationRow(symbol: SettingsPage.companion.symbol, colors: Theme.pink, title: "Companion",
+                              divider: false, action: { open(.companion) }) {
+                    EmptyView()
+                }
             }
 
-            Spacer(minLength: 0)
+            FormSection(footer: "Puts the notch back in the middle of the right edge of the main display.") {
+                FormRow(title: "Reset notch position", symbol: "arrow.counterclockwise", colors: Theme.orange, divider: false) {
+                    FormButton(title: "Reset Position", action: resetPosition)
+                }
+            }
         }
-        .padding(.horizontal, 22)
-        .padding(.top, 18)
-        .padding(.bottom, 16)
     }
 }
 
@@ -435,8 +745,7 @@ private struct DockedBadge: View {
     }
 }
 
-/// Like the account card at the top of System Settings: a live miniature of the notch on the
-/// edge it's docked to, with a summary underneath.
+/// A live miniature of the notch on the edge it's docked to, with a summary underneath.
 private struct HeroCard: View {
     @ObservedObject var settings: NotchSettings
     @ObservedObject var stats: SystemStats
@@ -447,8 +756,8 @@ private struct HeroCard: View {
         let edge = settings.dockedEdge
         let sizing = settings.sizing(for: edge)
         let collapsed = sizing.collapsed(horizontal: edge.isHorizontal)
-        // Fit the miniature in the 118 pt strip whatever its size.
-        let zoom = min(0.8, (edge.isHorizontal ? 400 : 100) / (edge.isHorizontal ? collapsed.width : collapsed.height))
+        // Fit the miniature in the 128 pt strip whatever its size.
+        let zoom = min(0.85, (edge.isHorizontal ? 420 : 108) / (edge.isHorizontal ? collapsed.width : collapsed.height))
 
         Button(action: action) {
             VStack(spacing: 0) {
@@ -459,7 +768,7 @@ private struct HeroCard: View {
                         .id(edge)
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 }
-                .frame(height: 118)
+                .frame(height: 128)
                 .clipped()
 
                 HStack(spacing: 12) {
@@ -482,14 +791,159 @@ private struct HeroCard: View {
                 .frame(height: 56)
                 .background(.white.opacity(0.04))
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.12)))
-            .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.white.opacity(0.1)))
             .animation(Theme.control, value: edge)
             .animation(Theme.control, value: sizing)
         }
-        .buttonStyle(PressStyle(scale: 0.99))
+        .buttonStyle(PressStyle(scale: 0.995))
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
+    }
+}
+
+// MARK: - Edge presets
+
+private struct EdgesPage: View {
+    @ObservedObject var settings: NotchSettings
+    let openEdge: (NotchEdge) -> Void
+
+    var body: some View {
+        PageColumn {
+            FormSection(title: "Sizes", footer: "Each edge remembers its own size. Move the notch and it switches automatically.") {
+                ForEach(Array(NotchEdge.allCases.enumerated()), id: \.element) { index, edge in
+                    NavigationRow(symbol: edge.symbol, colors: edge == settings.dockedEdge ? Theme.blue : Theme.graphite,
+                                  title: edge.title, divider: index < NotchEdge.allCases.count - 1,
+                                  action: { openEdge(edge) }) {
+                        HStack(spacing: 8) {
+                            if edge == settings.dockedEdge { DockedBadge() }
+                            Text(pointSize(settings.sizing(for: edge), on: edge))
+                                .monospacedDigit()
+                                .contentTransition(.numericText())
+                        }
+                    }
+                }
+            }
+            FormSection(footer: "Puts every edge back to the standard size.") {
+                FormRow(title: "Reset all edges", symbol: "arrow.counterclockwise", colors: Theme.orange, divider: false) {
+                    FormButton(title: "Reset All", isEnabled: NotchEdge.allCases.contains { settings.sizing(for: $0) != .standard }) {
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+                            for edge in NotchEdge.allCases { settings.reset(edge) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Companion
+
+private struct CompanionPage: View {
+    @ObservedObject var settings: NotchSettings
+    @ObservedObject var link: CompanionLink
+
+    var body: some View {
+        PageColumn {
+            FormSection(title: "Terraria Companion") {
+                FormRow(title: status.title, detail: status.detail, symbol: "heart.fill", colors: Theme.pink, divider: false) {
+                    HStack(spacing: 5) {
+                        Circle().fill(link.connected ? Color.green : Color.white.opacity(0.3)).frame(width: 7, height: 7)
+                        Text(link.connected ? "Connected" : "Not running")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.secondary)
+                    }
+                }
+            }
+
+            FormSection(title: "Cookies",
+                        footer: "Drag a cookie onto her, or click it and she'll go and eat it. She loves them (it fills her affection meter, like a cookie on the desktop).") {
+                FormRow(title: "Cookies turn up", detail: "When you open the notch with her inside.",
+                        symbol: "sparkles", colors: Theme.orange) {
+                    Picker("", selection: $settings.cookieFrequency) {
+                        ForEach(CookieFrequency.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                FormRow(title: "Cookie button", detail: "Beside Notch Settings in the opened notch.",
+                        symbol: "hand.tap.fill", colors: Theme.orange, divider: false) {
+                    Toggle("", isOn: $settings.showsCookieButton)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+            }
+
+            FormSection(title: "Messages",
+                        footer: "Unread messages stay until you've read them. Dismiss one with its \u{2715}.") {
+                FormRow(title: "Keep read messages", symbol: "text.bubble.fill", colors: Theme.green) {
+                    Picker("", selection: $settings.messageLifetime) {
+                        ForEach(MessageLifetime.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                }
+                FormRow(title: "Messages", detail: messageSummary, symbol: "tray.full.fill", colors: Theme.graphite, divider: false) {
+                    FormButton(title: "Clear All", role: .destructive, isEnabled: !link.messages.isEmpty) {
+                        withAnimation(Theme.control) { link.clearAll() }
+                    }
+                }
+            }
+        }
+    }
+
+    private var status: (title: String, detail: String) {
+        if let r = link.resident {
+            return ("\(r.name) lives in the notch", "Open the notch to see her. Drag her out to bring her back to the desktop.")
+        }
+        if link.connected {
+            return ("Nobody lives here yet", "Drag or throw a companion onto the notch to let her move in.")
+        }
+        return ("Terraria Companion isn't running", "Open it to let a companion move into the notch.")
+    }
+
+    private var messageSummary: String {
+        let all = link.messages.count, unread = link.unread.count
+        if all == 0 { return "None kept" }
+        return unread > 0 ? "\(all) kept, \(unread) unread" : "\(all) kept"
+    }
+}
+
+// MARK: - About
+
+private struct AboutPage: View {
+    var body: some View {
+        PageColumn {
+            VStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(LinearGradient(colors: [Color(white: 0.28), Color(white: 0.1)], startPoint: .top, endPoint: .bottom))
+                    Capsule().fill(.black).frame(width: 34, height: 11).frame(maxHeight: .infinity, alignment: .top).padding(.top, 9)
+                }
+                .frame(width: 64, height: 64)
+                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.14)))
+                Text("CustomNotch").font(.system(size: 17, weight: .semibold))
+                Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 10)
+
+            FormSection {
+                FormRow(title: "Open the notch", detail: "Hover over it. Pin it to keep it open.", symbol: "cursorarrow.motionlines", colors: Theme.blue) {
+                    EmptyView()
+                }
+                FormRow(title: "Move it", detail: "Drag or throw it to any screen edge.", symbol: "hand.draw.fill", colors: Theme.violet) {
+                    EmptyView()
+                }
+                FormRow(title: "Details", detail: "Click Battery, CPU or Memory for a closer look.", symbol: "chart.bar.fill", colors: Theme.green, divider: false) {
+                    EmptyView()
+                }
+            }
+        }
     }
 }
 
@@ -547,9 +1001,11 @@ private struct AppearancePage: View {
                 }
             }
         }
-        .padding(.horizontal, 26)
-        .padding(.top, 14)
-        .padding(.bottom, 18)
+        .frame(maxWidth: 600)
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 24)
+        .frame(maxWidth: .infinity)
         .animation(Theme.control, value: edge)
     }
 
@@ -587,7 +1043,7 @@ private struct EdgePicker: View {
                         }
                     }
                     .foregroundStyle(.white.opacity(selected ? 1 : 0.6))
-                    .frame(width: 112, height: 28)
+                    .frame(width: 104, height: 26)
                     .background {
                         if selected {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -686,7 +1142,7 @@ private struct ResizablePreview: View {
     @State private var hovering = false
 
     /// Fixed per orientation so a drag maps to the same change throughout.
-    private var zoom: CGFloat { edge.isHorizontal ? 1.5 : 0.92 }
+    private var zoom: CGFloat { edge.isHorizontal ? 1.3 : 0.92 }
 
     enum Handle: CaseIterable {
         case start, end, depth, startCorner, endCorner

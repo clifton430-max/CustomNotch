@@ -108,6 +108,48 @@ struct NotchSizing: Equatable, Codable {
     }
 }
 
+/// How often a cookie turns up when you open the notch with a companion inside.
+enum CookieFrequency: String, CaseIterable, Codable {
+    case never, rarely, sometimes, often
+
+    var title: String { rawValue.capitalized }
+
+    /// Chance per opening (a short cooldown keeps it from repeating back to back).
+    var chance: Double {
+        switch self {
+        case .never: 0
+        case .rarely: 0.1
+        case .sometimes: 0.22
+        case .often: 0.4
+        }
+    }
+}
+
+/// How long her messages stay after you've read them.
+enum MessageLifetime: String, CaseIterable, Codable {
+    case fiveMinutes, thirtyMinutes, oneHour, oneDay, forever
+
+    var title: String {
+        switch self {
+        case .fiveMinutes: "5 Minutes"
+        case .thirtyMinutes: "30 Minutes"
+        case .oneHour: "1 Hour"
+        case .oneDay: "1 Day"
+        case .forever: "Until Dismissed"
+        }
+    }
+
+    var seconds: TimeInterval? {
+        switch self {
+        case .fiveMinutes: 5 * 60
+        case .thirtyMinutes: 30 * 60
+        case .oneHour: 60 * 60
+        case .oneDay: 24 * 60 * 60
+        case .forever: nil
+        }
+    }
+}
+
 /// Persisted notch preferences, edited live from the Notch Settings window.
 @MainActor
 final class NotchSettings: ObservableObject {
@@ -119,7 +161,22 @@ final class NotchSettings: ObservableObject {
     /// Where the notch is docked right now. Kept current by `NotchController`.
     @Published var dockedEdge: NotchEdge = .right
 
+    // The resident companion.
+    @Published var cookieFrequency: CookieFrequency {
+        didSet { UserDefaults.standard.set(cookieFrequency.rawValue, forKey: Self.cookieFrequencyKey) }
+    }
+    /// The cookie button beside Notch Settings in the opened notch.
+    @Published var showsCookieButton: Bool {
+        didSet { UserDefaults.standard.set(showsCookieButton, forKey: Self.cookieButtonKey) }
+    }
+    @Published var messageLifetime: MessageLifetime {
+        didSet { UserDefaults.standard.set(messageLifetime.rawValue, forKey: Self.messageLifetimeKey) }
+    }
+
     private static let sizesKey = "edgeSizes"
+    private static let cookieFrequencyKey = "cookieFrequency"
+    private static let cookieButtonKey = "cookieButton"
+    private static let messageLifetimeKey = "messageLifetime"
 
     init() {
         let d = UserDefaults.standard
@@ -137,6 +194,9 @@ final class NotchSettings: ObservableObject {
                                      scale: legacy("sizeScale")).clamped()
             sizes = Dictionary(uniqueKeysWithValues: NotchEdge.allCases.map { ($0, shared) })
         }
+        cookieFrequency = d.string(forKey: Self.cookieFrequencyKey).flatMap(CookieFrequency.init(rawValue:)) ?? .sometimes
+        showsCookieButton = d.object(forKey: Self.cookieButtonKey) as? Bool ?? true
+        messageLifetime = d.string(forKey: Self.messageLifetimeKey).flatMap(MessageLifetime.init(rawValue:)) ?? .thirtyMinutes
     }
 
     func sizing(for edge: NotchEdge) -> NotchSizing { sizes[edge] ?? .standard }
@@ -178,5 +238,6 @@ final class NotchModel: ObservableObject {
 
     var openSettings: () -> Void = {}
     var openInventory: () -> Void = {}
+    var spawnCookie: () -> Void = {}
     var openDetail: (ResourceKind) -> Void = { _ in }
 }
